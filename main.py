@@ -1,9 +1,26 @@
 import os
 import json
+import threading
 import requests
 import anthropic
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
+
+# ── Health check server (keeps Render free tier alive) ───────────────────────
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass  # suppress access logs
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
 
 # ── Clients ──────────────────────────────────────────────────────────────────
 
@@ -140,6 +157,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    # Start health check server in background thread
+    threading.Thread(target=run_health_server, daemon=True).start()
+    print("✅ Health check server running")
+
+    # Start Telegram bot
     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("🤖 Duty World Bot is running...")
