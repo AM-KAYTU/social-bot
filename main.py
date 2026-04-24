@@ -358,12 +358,8 @@ Post raw text as-is. Write it first if described. Never post without being asked
 
 # ── Bot handlers ──────────────────────────────────────────────────────────────
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.effective_user.id) != MY_TELEGRAM_ID:
-        await update.message.reply_text("⛔ Unauthorized")
-        return
-
-    user_text = update.message.text
+async def process_instruction(user_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Core Claude processing — shared by text and voice handlers."""
     user_lower = user_text.lower().strip()
 
     # Draft approval shortcuts
@@ -481,6 +477,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != MY_TELEGRAM_ID:
+        await update.message.reply_text("⛔ Unauthorized")
+        return
+    await process_instruction(update.message.text, update, context)
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != MY_TELEGRAM_ID:
         await update.message.reply_text("⛔ Unauthorized")
@@ -550,10 +553,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         transcribed = transcript.text.strip()
         await update.message.reply_text(f'🎙️ Heard: "{transcribed}"')
-
-        # Inject transcribed text into a fake message and reuse handle_message logic
-        update.message.text = transcribed
-        await handle_message(update, context)
+        await process_instruction(transcribed, update, context)
 
     except Exception as e:
         await update.message.reply_text(f"❌ Transcription error: {e}")
