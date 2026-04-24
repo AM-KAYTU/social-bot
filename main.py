@@ -181,7 +181,9 @@ def post_tweet(text: str) -> dict:
         tweet_id = resp.data["id"]
         return {"success": True, "message": f"Posted to X", "tweet_id": tweet_id}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        detail = str(e)
+        print(f"[X ERROR] {detail}")
+        return {"success": False, "error": f"RAW X ERROR: {detail}"}
 
 
 def post_tweet_with_image(text: str, image_bytes: bytes) -> dict:
