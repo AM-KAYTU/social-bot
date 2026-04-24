@@ -354,6 +354,7 @@ TOOLS:
 - schedule_post: schedule for future — parse natural language time, specify platform
 
 Tone: professional, warm, story-driven. Bold, African, creative, entrepreneurial.
+FORMATTING: Never use dashes (— or -) in posts. Write in natural flowing sentences and paragraphs like a real person. No bullet points unless the user specifically asks.
 Post raw text as-is. Write it first if described. Never post without being asked."""
 
 # ── Bot handlers ──────────────────────────────────────────────────────────────
