@@ -331,37 +331,43 @@ TOOLS = [
 
 def get_system():
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    return f"""You are the personal social media manager for Fiifi Kaytu MA-Onhiawoda,
-CEO of Duty World Ltd. — a creative and entertainment company in Accra, Ghana.
-
-Duty World: Print & Publishing, Media, Recording Studio, Music Distribution.
-Flagship program: Beat and Sip (music, culture, community).
+    return f"""You are the personal social media assistant for Fiifi Kaytu MA-Onhiawoda, CEO of Duty World Ltd., a creative and entertainment company in Accra, Ghana. Duty World spans Print & Publishing, Media, Recording Studio, and Music Distribution. Flagship program: Beat and Sip.
 
 Current date and time (Ghana = UTC+0): {now}
 
-PLATFORMS: LinkedIn and X (Twitter). Always ask or infer which platform the user wants.
+YOUR ROLE: You are Fiifi's voice online. He can talk to you about anything — business, life, opinions, current events, industry trends, culture — and when he's ready, ask you to turn the conversation into a post. You are NOT limited to Duty World topics. Post about whatever Fiifi brings up.
+
+CONVERSATION MODE: Engage naturally. Ask follow-up questions if needed. When Fiifi says "post that", "write a post about this", or similar, craft a post from the conversation context.
+
+PLATFORMS: LinkedIn and X (Twitter). Always ask or infer which platform.
 - LinkedIn: longer, story-driven, professional
 - X/Twitter: punchy, max 280 characters
-- "both" / "everywhere": use post_both with platform-appropriate text for each
+- "both" / "everywhere": use post_both
 
 TOOLS:
 - post_linkedin: post to LinkedIn now
-- post_tweet: post to X now (≤280 chars)
+- post_tweet: post to X now (max 280 chars)
 - post_both: post to LinkedIn AND X simultaneously
-- reply_to_tweet: reply to a tweet — ask for tweet URL if not given
-- post_linkedin_comment: comment on a LinkedIn post — ask for post URL if not given
-- save_draft: hold for approval — show full draft, tell user 'post it' / 'cancel' / describe edits
+- reply_to_tweet: reply to a tweet (ask for URL if not given)
+- post_linkedin_comment: comment on a LinkedIn post (ask for URL if not given)
+- save_draft: hold for approval — show full draft, tell user "post it" / "cancel" / describe edits
 - schedule_post: schedule for future — parse natural language time, specify platform
 
-Tone: professional, warm, story-driven. Bold, African, creative, entrepreneurial.
-FORMATTING: Never use dashes (— or -) in posts. Write in natural flowing sentences and paragraphs like a real person. No bullet points unless the user specifically asks.
-Post raw text as-is. Write it first if described. Never post without being asked."""
+FORMATTING: Never use dashes (— or -) in posts. Write in natural flowing sentences like a real person. No bullet points unless specifically asked.
+Post raw text as-is if given. Write it if described. Never post without being explicitly asked."""
 
 # ── Bot handlers ──────────────────────────────────────────────────────────────
 
 async def process_instruction(user_text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Core Claude processing — shared by text and voice handlers."""
     user_lower = user_text.lower().strip()
+
+    # Clear conversation history
+    if user_lower in ["clear", "clear chat", "start over", "new topic", "reset"]:
+        context.user_data.pop("conversation_history", None)
+        context.user_data.pop("pending_draft", None)
+        await update.message.reply_text("🗑 Conversation cleared. Fresh start.")
+        return
 
     # Draft approval shortcuts
     if "pending_draft" in context.user_data:
@@ -392,7 +398,10 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
             )
 
     await update.message.reply_text("⏳ On it...")
-    messages = [{"role": "user", "content": user_text}]
+
+    # Build messages with conversation history
+    history = context.user_data.get("conversation_history", [])
+    messages = history + [{"role": "user", "content": user_text}]
 
     try:
         while True:
@@ -472,6 +481,10 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
             else:
                 reply = next((b.text for b in resp.content if hasattr(b, "text")), "✅ Done!")
                 await update.message.reply_text(reply)
+                # Save to conversation history (keep last 20 messages)
+                history.append({"role": "user", "content": user_text})
+                history.append({"role": "assistant", "content": reply})
+                context.user_data["conversation_history"] = history[-20:]
                 break
 
     except Exception as e:
@@ -549,10 +562,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             transcript = openai_client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
+                language="en",
+                prompt="Fiifi Kaytu, CEO of Duty World Ltd, Accra Ghana. Beat and Sip, LinkedIn, X, social media, entrepreneurship, creative industry, music, publishing, African business.",
             )
         os.unlink(tmp_path)
 
         transcribed = transcript.text.strip()
+
+        # Claude correction pass for Ghanaian English accent
+        fix = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{"role": "user", "content": f"This is a voice transcription from a Ghanaian English speaker. Fix any transcription errors while keeping the meaning exactly the same. Common proper nouns: Duty World, Beat and Sip, LinkedIn, Accra, Ghana. Return only the corrected text, nothing else.\n\n{transcribed}"}],
+        )
+        transcribed = next((b.text for b in fix.content if hasattr(b, "text")), transcribed).strip()
         await update.message.reply_text(f'🎙️ Heard: "{transcribed}"')
         await process_instruction(transcribed, update, context)
 
