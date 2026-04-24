@@ -6,6 +6,7 @@ import threading
 import requests
 import anthropic
 import tweepy
+import openai
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import quote, unquote
@@ -31,6 +32,7 @@ def run_health_server():
 # ── Clients ───────────────────────────────────────────────────────────────────
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+openai_client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 LINKEDIN_TOKEN = os.environ["LINKEDIN_ACCESS_TOKEN"]
 MY_TELEGRAM_ID = os.environ["TELEGRAM_USER_ID"]
 scheduler = AsyncIOScheduler()
@@ -523,6 +525,39 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Transcribe a Telegram voice message then process it like a text command."""
+    if str(update.effective_user.id) != MY_TELEGRAM_ID:
+        await update.message.reply_text("⛔ Unauthorized")
+        return
+
+    await update.message.reply_text("🎙️ Transcribing...")
+
+    try:
+        voice_file = await context.bot.get_file(update.message.voice.file_id)
+        voice_bytes = bytes(await voice_file.download_as_bytearray())
+
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+            f.write(voice_bytes)
+            tmp_path = f.name
+
+        with open(tmp_path, "rb") as audio_file:
+            transcript = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+            )
+        os.unlink(tmp_path)
+
+        transcribed = transcript.text.strip()
+        await update.message.reply_text(f'🎙️ Heard: "{transcribed}"')
+
+        # Inject transcribed text into a fake message and reuse handle_message logic
+        update.message.text = transcribed
+        await handle_message(update, context)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Transcription error: {e}")
+
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
 async def post_init(application: Application):
@@ -545,6 +580,7 @@ def main():
     )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     print("🤖 Duty World Bot is running...")
     app.run_polling(drop_pending_updates=True)
 
