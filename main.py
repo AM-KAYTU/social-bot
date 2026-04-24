@@ -416,6 +416,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                     elif block.name == "post_tweet":
                         result = post_tweet(block.input["text"])
+                        if not result["success"]:
+                            await update.message.reply_text(f"🔍 Raw X error: {result['error']}")
 
                     elif block.name == "post_both":
                         r_li = post_linkedin(block.input["linkedin_text"])
