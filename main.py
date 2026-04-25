@@ -887,8 +887,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         short_token = text[len("exchangetoken:"):].strip()
         await update.message.reply_text("⏳ Exchanging token...")
         try:
-            app_id     = "888495047594958"
-            app_secret = "d9d9440ea319170fc42e8067a2c45c2c"
+            app_id     = os.environ["FACEBOOK_APP_ID"]
+            app_secret = os.environ["FACEBOOK_APP_SECRET"]
 
             # Step 1: exchange for long-lived user token
             r1 = requests.get("https://graph.facebook.com/oauth/access_token", params={
