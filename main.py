@@ -276,7 +276,7 @@ def _extract_facebook_post_id(url_or_id: str) -> str | None:
     # /posts/XXX or /videos/XXX
     m = re.search(r'/(?:posts|videos|photos)/(\d+)', url_or_id)
     if m:
-        return f"{FACEBOOK_PAGE_ID}_{m.group(1)}" if FACEBOOK_PAGE_ID else m.group(1)
+        return m.group(1)
     # Raw composite ID like 123_456 or plain digits
     clean = url_or_id.strip()
     if re.match(r'^\d+_\d+$', clean) or re.match(r'^\d+$', clean):
@@ -996,8 +996,9 @@ def find_post_url_by_content(post_text: str, platform: str) -> str | None:
             msg = post.get("message", "")
             if msg and _word_overlap(post_text, msg) >= 0.35:
                 post_id = post.get("id", "")
+                page_id = post_id.split("_")[0] if "_" in post_id else ""
                 local_id = post_id.split("_")[-1] if "_" in post_id else post_id
-                return f"https://www.facebook.com/permalink.php?story_fbid={local_id}&id={FACEBOOK_PAGE_ID}"
+                return f"https://www.facebook.com/permalink.php?story_fbid={local_id}&id={page_id}"
 
     return None
 
