@@ -424,8 +424,6 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
 
                     elif block.name == "post_tweet":
                         result = post_tweet(block.input["text"])
-                        if not result["success"]:
-                            await update.message.reply_text(f"🔍 Raw X error: {result['error']}")
 
                     elif block.name == "post_both":
                         r_li = post_linkedin(block.input["linkedin_text"])
