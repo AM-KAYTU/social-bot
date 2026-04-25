@@ -175,6 +175,62 @@ def post_linkedin_comment(post_url: str, comment_text: str) -> dict:
         return {"success": True, "message": "Comment posted on LinkedIn"}
     return {"success": False, "error": r.text}
 
+def _extract_linkedin_urn(post_url: str):
+    """Return (urn, encoded_urn) or raise a user-friendly error string."""
+    for candidate in [post_url, unquote(post_url)]:
+        m = re.search(r'urn:li:[A-Za-z]+:[0-9]+', candidate)
+        if m:
+            urn = m.group(0)
+            return urn, quote(urn, safe="")
+    return None, None
+
+
+def edit_linkedin_post(post_url: str, new_text: str) -> dict:
+    urn, encoded_urn = _extract_linkedin_urn(post_url)
+    if not urn:
+        return {"success": False, "error": "Could not find post URN in URL. Paste the full LinkedIn post URL from your browser."}
+    r = requests.post(
+        f"https://api.linkedin.com/v2/ugcPosts/{encoded_urn}",
+        headers={
+            "Authorization": f"Bearer {LINKEDIN_TOKEN}",
+            "Content-Type": "application/json",
+            "X-Restli-Protocol-Version": "2.0.0",
+            "X-HTTP-Method-Override": "PATCH",
+        },
+        json={
+            "patch": {
+                "$set": {
+                    "specificContent": {
+                        "com.linkedin.ugc.ShareContent": {
+                            "shareCommentary": {"text": new_text},
+                            "shareMediaCategory": "NONE",
+                        }
+                    }
+                }
+            }
+        },
+    )
+    if r.status_code in (200, 204):
+        return {"success": True, "message": "LinkedIn post updated successfully"}
+    return {"success": False, "error": r.text}
+
+
+def delete_linkedin_post(post_url: str) -> dict:
+    urn, encoded_urn = _extract_linkedin_urn(post_url)
+    if not urn:
+        return {"success": False, "error": "Could not find post URN in URL. Paste the full LinkedIn post URL from your browser."}
+    r = requests.delete(
+        f"https://api.linkedin.com/v2/ugcPosts/{encoded_urn}",
+        headers={
+            "Authorization": f"Bearer {LINKEDIN_TOKEN}",
+            "X-Restli-Protocol-Version": "2.0.0",
+        },
+    )
+    if r.status_code in (200, 204):
+        return {"success": True, "message": "LinkedIn post deleted successfully"}
+    return {"success": False, "error": r.text}
+
+
 # ── X / Twitter functions ─────────────────────────────────────────────────────
 
 def post_tweet(text: str) -> dict:
@@ -216,6 +272,23 @@ def reply_to_tweet(tweet_url: str, reply_text: str) -> dict:
         return {"success": True, "message": "Reply posted on X", "tweet_id": resp.data["id"]}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+def delete_tweet(tweet_url: str) -> dict:
+    m = re.search(r'/status/(\d+)', tweet_url)
+    if not m:
+        if tweet_url.strip().isdigit():
+            tweet_id = tweet_url.strip()
+        else:
+            return {"success": False, "error": "Could not find tweet ID. Paste the full tweet URL (e.g. https://x.com/user/status/123...)."}
+    else:
+        tweet_id = m.group(1)
+    try:
+        twitter_v2.delete_tweet(tweet_id)
+        return {"success": True, "message": "Tweet deleted successfully"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 
 # ── Scheduled post executor ───────────────────────────────────────────────────
 
@@ -287,6 +360,40 @@ TOOLS = [
         },
     },
     {
+        "name": "edit_linkedin_post",
+        "description": "Edit/update the text of an existing LinkedIn post. Ask for the post URL if not provided.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "post_url": {"type": "string", "description": "Full LinkedIn post URL from the browser"},
+                "new_text": {"type": "string", "description": "The updated post content to replace the current text"},
+            },
+            "required": ["post_url", "new_text"],
+        },
+    },
+    {
+        "name": "delete_linkedin_post",
+        "description": "Permanently delete a LinkedIn post. Ask for the post URL if not provided. Confirm with user before deleting.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "post_url": {"type": "string", "description": "Full LinkedIn post URL from the browser"},
+            },
+            "required": ["post_url"],
+        },
+    },
+    {
+        "name": "delete_tweet",
+        "description": "Permanently delete a tweet on X. Ask for the tweet URL if not provided. Note: X does not support editing tweets via API — to change a tweet, delete it and post a new one. Confirm with user before deleting.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tweet_url": {"type": "string", "description": "Full tweet URL (https://x.com/user/status/...)"},
+            },
+            "required": ["tweet_url"],
+        },
+    },
+    {
         "name": "save_draft",
         "description": (
             "Save a post as a draft for the user to review before posting. "
@@ -354,6 +461,9 @@ TOOLS:
 - post_both: post to LinkedIn AND X simultaneously
 - reply_to_tweet: reply to a tweet (ask for URL if not given)
 - post_linkedin_comment: comment on a LinkedIn post (ask for URL if not given)
+- edit_linkedin_post: update the text of an existing LinkedIn post (ask for post URL)
+- delete_linkedin_post: permanently delete a LinkedIn post (ask for post URL, confirm first)
+- delete_tweet: permanently delete a tweet (ask for tweet URL, confirm first; X does not support editing tweets via API — delete and repost instead)
 - save_draft: hold for approval — show full draft, tell user "post it" / "cancel" / describe edits
 - schedule_post: schedule for future — parse natural language time, specify platform
 
@@ -447,6 +557,15 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
 
                     elif block.name == "post_linkedin_comment":
                         result = post_linkedin_comment(block.input["post_url"], block.input["comment_text"])
+
+                    elif block.name == "edit_linkedin_post":
+                        result = edit_linkedin_post(block.input["post_url"], block.input["new_text"])
+
+                    elif block.name == "delete_linkedin_post":
+                        result = delete_linkedin_post(block.input["post_url"])
+
+                    elif block.name == "delete_tweet":
+                        result = delete_tweet(block.input["tweet_url"])
 
                     elif block.name == "save_draft":
                         platform = block.input.get("platform", "linkedin")
