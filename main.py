@@ -8,7 +8,7 @@ import requests
 import anthropic
 import tweepy
 import openai
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import quote, unquote
 from telegram import Update
@@ -53,6 +53,9 @@ for _i in range(1, 20):
     else:
         break
 FACEBOOK_ENABLED = bool(FACEBOOK_PAGES)
+# Date the Facebook tokens were last generated — used to calculate expiry reminders
+# Format: YYYY-MM-DD  e.g. 2026-04-25.  Update this in Render every time you renew tokens.
+FACEBOOK_TOKEN_GENERATED = os.environ.get("FACEBOOK_TOKEN_GENERATED", "")
 if FACEBOOK_ENABLED:
     for _pg in FACEBOOK_PAGES:
         print(f"✅ Facebook page: {_pg['name']} ({_pg['id']})")
@@ -1135,10 +1138,54 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Transcription error: {e}")
 
+# ── Facebook token expiry reminder ───────────────────────────────────────────
+
+async def check_facebook_token_expiry(bot):
+    """Send a Telegram reminder when Facebook tokens are 7 or 2 days from expiring."""
+    if not FACEBOOK_TOKEN_GENERATED or not FACEBOOK_ENABLED:
+        return
+    try:
+        generated = date.fromisoformat(FACEBOOK_TOKEN_GENERATED)
+        expiry    = generated + timedelta(days=60)
+        days_left = (expiry - date.today()).days
+
+        if days_left in (7, 2):
+            renewal_steps = (
+                "To renew:\n"
+                "1. Go to developers.facebook.com/tools/explorer\n"
+                "2. Select Duty World Bot app\n"
+                "3. Generate User Access Token (keep pages_manage_posts checked)\n"
+                "4. Switch to each page under Get Page Access Token\n"
+                "5. Run me/accounts and copy the new tokens\n"
+                "6. Update FACEBOOK_PAGE_1_TOKEN and FACEBOOK_PAGE_2_TOKEN in Render\n"
+                "7. Update FACEBOOK_TOKEN_GENERATED to today's date in Render"
+            )
+            await bot.send_message(
+                chat_id=MY_TELEGRAM_ID,
+                text=(
+                    f"⚠️ Facebook Token Expiry — {days_left} day{'s' if days_left != 1 else ''} left\n\n"
+                    f"Your Facebook Page Access Tokens expire on {expiry.strftime('%B %d, %Y')}. "
+                    f"Once expired the bot cannot post to Facebook until you renew them.\n\n"
+                    f"{renewal_steps}"
+                ),
+            )
+            print(f"[FB token reminder] Sent — {days_left} days left")
+    except Exception as e:
+        print(f"[FB token expiry check error] {e}")
+
+
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
 async def post_init(application: Application):
     scheduler.start()
+    # Daily Facebook token expiry check at 9:00am Ghana time (UTC+0)
+    scheduler.add_job(
+        check_facebook_token_expiry,
+        "cron",
+        hour=9,
+        minute=0,
+        args=[application.bot],
+    )
     print("✅ Scheduler started")
 
 async def post_shutdown(application: Application):
