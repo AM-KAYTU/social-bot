@@ -38,6 +38,9 @@ LINKEDIN_TOKEN = os.environ["LINKEDIN_ACCESS_TOKEN"]
 MY_TELEGRAM_ID = os.environ["TELEGRAM_USER_ID"]
 scheduler = AsyncIOScheduler()
 
+# In-memory log of every post made through the bot (platform, url, text)
+_post_history: list[dict] = []
+
 # Twitter / X
 _tw_api_key        = os.environ["TWITTER_API_KEY"]
 _tw_api_secret     = os.environ["TWITTER_API_SECRET"]
@@ -96,7 +99,9 @@ def post_linkedin(text: str) -> dict:
         },
     )
     if r.status_code == 201:
-        return {"success": True, "message": "Posted to LinkedIn"}
+        post_urn = r.headers.get("x-restli-id", "")
+        post_url = f"https://www.linkedin.com/feed/update/{post_urn}/" if post_urn else None
+        return {"success": True, "message": "Posted to LinkedIn", "post_url": post_url}
     return {"success": False, "error": r.text}
 
 
@@ -149,7 +154,9 @@ def post_linkedin_with_image(text: str, image_bytes: bytes) -> dict:
         },
     )
     if r.status_code == 201:
-        return {"success": True, "message": "Posted to LinkedIn with image"}
+        post_urn = r.headers.get("x-restli-id", "")
+        post_url = f"https://www.linkedin.com/feed/update/{post_urn}/" if post_urn else None
+        return {"success": True, "message": "Posted to LinkedIn with image", "post_url": post_url}
     return {"success": False, "error": r.text}
 
 
@@ -238,7 +245,10 @@ def post_tweet(text: str) -> dict:
     try:
         resp = twitter_v2.create_tweet(text=text)
         tweet_id = resp.data["id"]
-        return {"success": True, "message": f"Posted to X", "tweet_id": tweet_id}
+        me = twitter_v2.get_me()
+        username = me.data.username if me and me.data else "i"
+        tweet_url = f"https://x.com/{username}/status/{tweet_id}"
+        return {"success": True, "message": "Posted to X", "tweet_id": tweet_id, "post_url": tweet_url}
     except Exception as e:
         detail = str(e)
         print(f"[X ERROR] {detail}")
@@ -495,10 +505,14 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
             if platform in ("linkedin", "both"):
                 r = post_linkedin(draft["text"])
                 lines.append(f"LinkedIn: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
+                if r.get("success"):
+                    _record_post("linkedin", r.get("post_url"), draft["text"])
             if platform in ("twitter", "both"):
                 tw_text = draft.get("twitter_text", draft["text"][:280])
                 r = post_tweet(tw_text)
                 lines.append(f"X: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
+                if r.get("success"):
+                    _record_post("twitter", r.get("post_url"), tw_text)
             summary = draft["text"]
             if platform == "both" and draft.get("twitter_text"):
                 summary = f"LinkedIn:\n{draft['text']}\n\nX:\n{draft['twitter_text']}"
@@ -540,13 +554,21 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
 
                     if block.name == "post_linkedin":
                         result = post_linkedin(block.input["text"])
+                        if result.get("success"):
+                            _record_post("linkedin", result.get("post_url"), block.input["text"])
 
                     elif block.name == "post_tweet":
                         result = post_tweet(block.input["text"])
+                        if result.get("success"):
+                            _record_post("twitter", result.get("post_url"), block.input["text"])
 
                     elif block.name == "post_both":
                         r_li = post_linkedin(block.input["linkedin_text"])
                         r_tw = post_tweet(block.input["twitter_text"])
+                        if r_li.get("success"):
+                            _record_post("linkedin", r_li.get("post_url"), block.input["linkedin_text"])
+                        if r_tw.get("success"):
+                            _record_post("twitter", r_tw.get("post_url"), block.input["twitter_text"])
                         result = {
                             "success": r_li["success"] or r_tw["success"],
                             "linkedin": r_li,
@@ -626,54 +648,86 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_instruction(update.message.text, update, context)
 
 
-def fetch_recent_linkedin_posts(count: int = 20) -> list:
-    r = requests.get(
-        "https://api.linkedin.com/v2/ugcPosts",
-        params={"q": "authors", "authors": f"List(urn:li:person:{LINKEDIN_URN})", "count": count},
-        headers={
-            "Authorization": f"Bearer {LINKEDIN_TOKEN}",
-            "X-Restli-Protocol-Version": "2.0.0",
-        },
-    )
-    if r.status_code == 200:
-        return r.json().get("elements", [])
-    return []
+def _record_post(platform: str, url: str | None, text: str):
+    """Log every post the bot creates so screenshots can be matched without API search."""
+    if url:
+        _post_history.append({"platform": platform, "url": url, "text": text})
+        if len(_post_history) > 100:
+            _post_history.pop(0)
 
 
-def fetch_recent_tweets(count: int = 20) -> list:
-    try:
-        me = twitter_v2.get_me()
-        result = twitter_v2.get_users_tweets(me.data.id, max_results=count, tweet_fields=["text"])
-        return result.data or []
-    except Exception:
-        return []
+def _word_overlap(a: str, b: str) -> float:
+    """Return fraction of words shared between two strings (0.0–1.0)."""
+    clean = lambda s: set(re.sub(r'[^\w\s]', '', s.lower()).split())
+    wa, wb = clean(a), clean(b)
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / max(len(wa), len(wb))
 
 
 def find_post_url_by_content(post_text: str, platform: str) -> str | None:
-    """Match post_text against recent posts and return the post URL if found."""
-    needle = post_text.strip().lower()[:80]
+    """Find a post URL by matching text — checks bot's own post log first, then platform API."""
+    if not post_text.strip():
+        return None
+
+    # 1. Check in-memory post history (most reliable — no API needed)
+    best_url, best_score = None, 0.0
+    for entry in reversed(_post_history):
+        if entry["platform"] != platform:
+            continue
+        score = _word_overlap(post_text, entry["text"])
+        if score > best_score:
+            best_score, best_url = score, entry["url"]
+    if best_score >= 0.35:
+        return best_url
+
+    # 2. Fall back to platform API search
     if platform == "linkedin":
-        for post in fetch_recent_linkedin_posts():
-            try:
-                text = post["specificContent"]["com.linkedin.ugc.ShareContent"]["shareCommentary"]["text"]
-                if needle in text.lower() or text.lower()[:80] in needle:
-                    urn = post["id"]
-                    return f"https://www.linkedin.com/feed/update/{urn}/"
-            except (KeyError, TypeError):
-                continue
+        # Build URL manually — avoid requests encoding the List() syntax
+        raw_url = (
+            f"https://api.linkedin.com/v2/ugcPosts"
+            f"?q=authors&authors=List(urn:li:person:{LINKEDIN_URN})&count=20"
+        )
+        try:
+            s = requests.Session()
+            req = requests.Request("GET", raw_url, headers={
+                "Authorization": f"Bearer {LINKEDIN_TOKEN}",
+                "X-Restli-Protocol-Version": "2.0.0",
+            })
+            prepped = s.prepare_request(req)
+            prepped.url = raw_url  # Override to prevent re-encoding
+            r = s.send(prepped)
+            if r.status_code == 200:
+                for post in r.json().get("elements", []):
+                    try:
+                        text = post["specificContent"]["com.linkedin.ugc.ShareContent"]["shareCommentary"]["text"]
+                        if _word_overlap(post_text, text) >= 0.35:
+                            return f"https://www.linkedin.com/feed/update/{post['id']}/"
+                    except (KeyError, TypeError):
+                        continue
+        except Exception:
+            pass
+
     elif platform in ("twitter", "x"):
-        for tweet in fetch_recent_tweets():
-            if needle in tweet.text.lower() or tweet.text.lower()[:80] in needle:
-                return f"https://x.com/i/status/{tweet.id}"
+        try:
+            me = twitter_v2.get_me()
+            result = twitter_v2.get_users_tweets(me.data.id, max_results=20, tweet_fields=["text"])
+            if result.data:
+                for tweet in result.data:
+                    if _word_overlap(post_text, tweet.text) >= 0.35:
+                        return f"https://x.com/i/status/{tweet.id}"
+        except Exception:
+            pass
+
     return None
 
 
 def vision_identify_post(image_bytes: bytes) -> dict:
-    """Use Claude Vision to extract URL, platform, and post text from a screenshot."""
+    """Use Claude Vision to extract URL, platform, and full post text from a screenshot."""
     image_b64 = base64.b64encode(image_bytes).decode()
     resp = claude.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=600,
+        max_tokens=1000,
         messages=[{
             "role": "user",
             "content": [
@@ -685,12 +739,12 @@ def vision_identify_post(image_bytes: bytes) -> dict:
                     "type": "text",
                     "text": (
                         "This is a screenshot of a social media post. Extract:\n"
-                        "1. The exact URL of the post if visible anywhere (browser address bar, share button area, etc.)\n"
+                        "1. The exact URL if visible anywhere — check the browser address bar carefully.\n"
                         "2. The platform: linkedin or twitter\n"
-                        "3. The full text content of the post\n\n"
-                        "Return ONLY valid JSON with no explanation:\n"
-                        "{\"url\": \"https://...\", \"platform\": \"linkedin\", \"post_text\": \"...\"}\n"
-                        "Set url to null if not visible."
+                        "3. The COMPLETE full text of the post body — copy every word exactly as written, do not summarise.\n\n"
+                        "Return ONLY valid JSON, no explanation:\n"
+                        "{\"url\": \"https://...or null\", \"platform\": \"linkedin\", \"post_text\": \"full text here\"}\n"
+                        "Set url to null if not visible in the screenshot."
                     ),
                 },
             ],
@@ -779,9 +833,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if platform in ("linkedin", "both"):
             r = post_linkedin_with_image(caption, image_bytes)
             lines.append(f"LinkedIn: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
+            if r.get("success"):
+                _record_post("linkedin", r.get("post_url"), caption)
         if platform in ("twitter", "both"):
             r = post_tweet_with_image(caption[:280], image_bytes)
             lines.append(f"X: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
+            if r.get("success"):
+                _record_post("twitter", r.get("post_url"), caption[:280])
 
         await update.message.reply_text("\n".join(lines) + f"\n\nCaption:\n{caption}")
 
