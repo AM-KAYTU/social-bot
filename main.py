@@ -41,15 +41,29 @@ scheduler = AsyncIOScheduler()
 # In-memory log of every post made through the bot (platform, url, text)
 _post_history: list[dict] = []
 
-# Facebook
-FACEBOOK_PAGE_TOKEN = os.environ.get("FACEBOOK_PAGE_TOKEN", "")
-FACEBOOK_PAGE_ID    = os.environ.get("FACEBOOK_PAGE_ID", "")
-FACEBOOK_ENABLED    = bool(FACEBOOK_PAGE_TOKEN and FACEBOOK_PAGE_ID)
-GRAPH_API           = "https://graph.facebook.com/v19.0"
+# Facebook — supports multiple pages via FACEBOOK_PAGE_1_TOKEN/ID, FACEBOOK_PAGE_2_TOKEN/ID, etc.
+GRAPH_API      = "https://graph.facebook.com/v19.0"
+FACEBOOK_PAGES = []
+for _i in range(1, 20):
+    _t = os.environ.get(f"FACEBOOK_PAGE_{_i}_TOKEN", "")
+    _p = os.environ.get(f"FACEBOOK_PAGE_{_i}_ID", "")
+    if _t and _p:
+        FACEBOOK_PAGES.append({"token": _t, "id": _p})
+    else:
+        break
+# Legacy single-page fallback
+_legacy_token = os.environ.get("FACEBOOK_PAGE_TOKEN", "")
+_legacy_id    = os.environ.get("FACEBOOK_PAGE_ID", "")
+if _legacy_token and _legacy_id and not FACEBOOK_PAGES:
+    FACEBOOK_PAGES.append({"token": _legacy_token, "id": _legacy_id})
+FACEBOOK_ENABLED = bool(FACEBOOK_PAGES)
+# Convenience aliases for single-page functions that still need them
+FACEBOOK_PAGE_TOKEN = FACEBOOK_PAGES[0]["token"] if FACEBOOK_PAGES else ""
+FACEBOOK_PAGE_ID    = FACEBOOK_PAGES[0]["id"]    if FACEBOOK_PAGES else ""
 if FACEBOOK_ENABLED:
-    print("✅ Facebook enabled")
+    print(f"✅ Facebook enabled — {len(FACEBOOK_PAGES)} page(s)")
 else:
-    print("⚠️  Facebook not configured — set FACEBOOK_PAGE_TOKEN and FACEBOOK_PAGE_ID to enable")
+    print("⚠️  Facebook not configured — add FACEBOOK_PAGE_1_TOKEN and FACEBOOK_PAGE_1_ID to enable")
 
 # Twitter / X
 _tw_api_key        = os.environ["TWITTER_API_KEY"]
@@ -273,42 +287,70 @@ def _extract_facebook_post_id(url_or_id: str) -> str | None:
     return None
 
 
+def _fb_post_url(post_id: str, page_id: str) -> str | None:
+    if not post_id:
+        return None
+    local_id = post_id.split("_")[-1] if "_" in post_id else post_id
+    return f"https://www.facebook.com/permalink.php?story_fbid={local_id}&id={page_id}"
+
+
+def _fb_token_for_post_id(post_id: str) -> str:
+    """Return the right page token based on page ID prefix in the composite post ID."""
+    for page in FACEBOOK_PAGES:
+        if post_id.startswith(page["id"]):
+            return page["token"]
+    return FACEBOOK_PAGES[0]["token"] if FACEBOOK_PAGES else ""
+
+
 def post_facebook(text: str) -> dict:
-    r = requests.post(
-        f"{GRAPH_API}/{FACEBOOK_PAGE_ID}/feed",
-        json={"message": text, "access_token": FACEBOOK_PAGE_TOKEN},
-    )
-    if r.status_code == 200:
-        data = r.json()
-        post_id = data.get("id", "")
-        local_id = post_id.split("_")[-1] if "_" in post_id else post_id
-        post_url = f"https://www.facebook.com/permalink.php?story_fbid={local_id}&id={FACEBOOK_PAGE_ID}" if local_id else None
-        return {"success": True, "message": "Posted to Facebook", "post_url": post_url, "post_id": post_id}
-    return {"success": False, "error": r.text}
+    """Post to all configured Facebook pages."""
+    results, first_url = [], None
+    for page in FACEBOOK_PAGES:
+        r = requests.post(
+            f"{GRAPH_API}/{page['id']}/feed",
+            json={"message": text, "access_token": page["token"]},
+        )
+        if r.status_code == 200:
+            post_id = r.json().get("id", "")
+            url = _fb_post_url(post_id, page["id"])
+            if not first_url:
+                first_url = url
+            results.append({"success": True, "post_url": url, "post_id": post_id})
+        else:
+            results.append({"success": False, "error": r.text})
+    success = any(r["success"] for r in results)
+    return {"success": success, "message": f"Posted to {sum(r['success'] for r in results)}/{len(FACEBOOK_PAGES)} Facebook page(s)", "post_url": first_url, "results": results}
 
 
 def post_facebook_with_image(text: str, image_bytes: bytes) -> dict:
-    r = requests.post(
-        f"{GRAPH_API}/{FACEBOOK_PAGE_ID}/photos",
-        data={"caption": text, "access_token": FACEBOOK_PAGE_TOKEN},
-        files={"source": ("image.jpg", image_bytes, "image/jpeg")},
-    )
-    if r.status_code == 200:
-        data = r.json()
-        post_id = data.get("post_id", data.get("id", ""))
-        local_id = post_id.split("_")[-1] if "_" in post_id else post_id
-        post_url = f"https://www.facebook.com/permalink.php?story_fbid={local_id}&id={FACEBOOK_PAGE_ID}" if local_id else None
-        return {"success": True, "message": "Posted to Facebook with image", "post_url": post_url, "post_id": post_id}
-    return {"success": False, "error": r.text}
+    """Post image to all configured Facebook pages."""
+    results, first_url = [], None
+    for page in FACEBOOK_PAGES:
+        r = requests.post(
+            f"{GRAPH_API}/{page['id']}/photos",
+            data={"caption": text, "access_token": page["token"]},
+            files={"source": ("image.jpg", image_bytes, "image/jpeg")},
+        )
+        if r.status_code == 200:
+            post_id = r.json().get("post_id", r.json().get("id", ""))
+            url = _fb_post_url(post_id, page["id"])
+            if not first_url:
+                first_url = url
+            results.append({"success": True, "post_url": url, "post_id": post_id})
+        else:
+            results.append({"success": False, "error": r.text})
+    success = any(r["success"] for r in results)
+    return {"success": success, "message": f"Posted image to {sum(r['success'] for r in results)}/{len(FACEBOOK_PAGES)} Facebook page(s)", "post_url": first_url, "results": results}
 
 
 def edit_facebook_post(post_url: str, new_text: str) -> dict:
     post_id = _extract_facebook_post_id(post_url)
     if not post_id:
         return {"success": False, "error": "Could not identify the Facebook post. Paste the full post URL."}
+    token = _fb_token_for_post_id(post_id)
     r = requests.post(
         f"{GRAPH_API}/{post_id}",
-        json={"message": new_text, "access_token": FACEBOOK_PAGE_TOKEN},
+        json={"message": new_text, "access_token": token},
     )
     if r.status_code == 200:
         return {"success": True, "message": "Facebook post updated"}
@@ -319,9 +361,10 @@ def delete_facebook_post(post_url: str) -> dict:
     post_id = _extract_facebook_post_id(post_url)
     if not post_id:
         return {"success": False, "error": "Could not identify the Facebook post. Paste the full post URL."}
+    token = _fb_token_for_post_id(post_id)
     r = requests.delete(
         f"{GRAPH_API}/{post_id}",
-        params={"access_token": FACEBOOK_PAGE_TOKEN},
+        params={"access_token": token},
     )
     if r.status_code == 200:
         return {"success": True, "message": "Facebook post deleted"}
@@ -329,14 +372,16 @@ def delete_facebook_post(post_url: str) -> dict:
 
 
 def fetch_recent_facebook_posts(count: int = 20) -> list:
-    r = requests.get(
-        f"{GRAPH_API}/{FACEBOOK_PAGE_ID}/feed",
-        params={"fields": "id,message,created_time", "limit": count, "access_token": FACEBOOK_PAGE_TOKEN},
-    )
-    if r.status_code == 200:
-        return r.json().get("data", [])
-    return []
-
+    """Fetch recent posts from all configured Facebook pages."""
+    all_posts = []
+    for page in FACEBOOK_PAGES:
+        r = requests.get(
+            f"{GRAPH_API}/{page['id']}/feed",
+            params={"fields": "id,message,created_time", "limit": count, "access_token": page["token"]},
+        )
+        if r.status_code == 200:
+            all_posts.extend(r.json().get("data", []))
+    return all_posts
 
 # ── X / Twitter functions ─────────────────────────────────────────────────────
 
