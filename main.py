@@ -1070,25 +1070,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if detected:
             fb_page_name = detected["name"]
 
-    # If caption looks like a user instruction rather than post content, generate a real caption
+    # Generate caption using Claude Vision (so it can actually see the image)
     _instruction_signals = ["post it on", "post on", "caption it", "write a caption", "share it on", "post this on", "caption this"]
-    user_instruction = caption
+    image_b64 = base64.b64encode(image_bytes).decode()
+    image_block = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}
+
     if caption and any(sig in cap_lower for sig in _instruction_signals):
-        gen_resp = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            system=get_system(),
-            messages=[{"role": "user", "content": f"Write a post caption for a photo based on this instruction: {caption}\n\nJust the caption text itself, nothing else. No labels, no explanations."}],
-        )
-        caption = next((b.text for b in gen_resp.content if hasattr(b, "text")), caption)
-    elif not caption:
-        resp = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            system=get_system(),
-            messages=[{"role": "user", "content": "Write a short caption for a photo I'm posting. Keep it on-brand for Duty World — creative, bold, professional. Just the caption text, nothing else."}],
-        )
-        caption = next((b.text for b in resp.content if hasattr(b, "text")), "")
+        prompt = f"Look at this image and write a post caption based on this instruction: {caption}\n\nJust the caption text itself, nothing else. No labels, no explanations."
+    else:
+        prompt = caption if caption else "Look at this image and write a short, punchy post caption for it. Keep it on-brand for Duty World — creative, bold, professional. Just the caption text, nothing else."
+
+    gen_resp = claude.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=400,
+        system=get_system(),
+        messages=[{"role": "user", "content": [image_block, {"type": "text", "text": prompt}]}],
+    )
+    caption = next((b.text for b in gen_resp.content if hasattr(b, "text")), caption)
 
     label = {"both": "LinkedIn + X", "all": "LinkedIn + X + Facebook", "facebook": f"Facebook ({fb_page_name or 'default page'})"}.get(platform, platform.title())
     await update.message.reply_text(f"⏳ Uploading image to {label}...")
