@@ -353,7 +353,7 @@ TOOLS:
 - save_draft: hold for approval — show full draft, tell user "post it" / "cancel" / describe edits
 - schedule_post: schedule for future — parse natural language time, specify platform
 
-FORMATTING: Never use dashes (— or -) in posts. Write in natural flowing sentences like a real person. No bullet points unless specifically asked.
+FORMATTING: Never use dashes, hyphens, or horizontal rules (—, -, ---) anywhere in posts. Never use bullet points unless specifically asked. Write in natural flowing paragraphs like a real person talking.
 Post raw text as-is if given. Write it if described. Never post without being explicitly asked."""
 
 # ── Bot handlers ──────────────────────────────────────────────────────────────
