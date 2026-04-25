@@ -673,7 +673,7 @@ PLATFORMS: LinkedIn, X (Twitter), and Facebook. Always ask or infer which platfo
 TOOLS:
 - post_linkedin: post to LinkedIn now
 - post_tweet: post to X now (max 280 chars)
-- post_facebook: post to Facebook now
+- post_facebook: post to Facebook now (ask which page)
 - post_both: post to LinkedIn AND X simultaneously (separate text for each)
 - post_all: post to LinkedIn, X, AND Facebook simultaneously (separate text for each)
 - reply_to_tweet: reply to a tweet (ask for URL if not given)
@@ -1063,19 +1063,37 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         platform = "linkedin"
 
-    label = {"both": "LinkedIn + X", "all": "LinkedIn + X + Facebook", "facebook": "Facebook"}.get(platform, platform.title())
+    # Detect Facebook page name from caption (before caption gets overwritten)
+    fb_page_name = ""
+    if platform in ("facebook", "all") and FACEBOOK_ENABLED and caption:
+        detected = _fb_resolve_page(caption)
+        if detected:
+            fb_page_name = detected["name"]
+
+    # If caption looks like a user instruction rather than post content, generate a real caption
+    _instruction_signals = ["post it on", "post on", "caption it", "write a caption", "share it on", "post this on", "caption this"]
+    user_instruction = caption
+    if caption and any(sig in cap_lower for sig in _instruction_signals):
+        gen_resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            system=get_system(),
+            messages=[{"role": "user", "content": f"Write a post caption for a photo based on this instruction: {caption}\n\nJust the caption text itself, nothing else. No labels, no explanations."}],
+        )
+        caption = next((b.text for b in gen_resp.content if hasattr(b, "text")), caption)
+    elif not caption:
+        resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            system=get_system(),
+            messages=[{"role": "user", "content": "Write a short caption for a photo I'm posting. Keep it on-brand for Duty World — creative, bold, professional. Just the caption text, nothing else."}],
+        )
+        caption = next((b.text for b in resp.content if hasattr(b, "text")), "")
+
+    label = {"both": "LinkedIn + X", "all": "LinkedIn + X + Facebook", "facebook": f"Facebook ({fb_page_name or 'default page'})"}.get(platform, platform.title())
     await update.message.reply_text(f"⏳ Uploading image to {label}...")
 
     try:
-        if not caption:
-            resp = claude.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=300,
-                system=get_system(),
-                messages=[{"role": "user", "content": "Write a short caption for a photo I'm posting. Keep it on-brand for Duty World — creative, bold, professional. Just the caption text, nothing else."}],
-            )
-            caption = next((b.text for b in resp.content if hasattr(b, "text")), "")
-
         lines = []
         if platform in ("linkedin", "both", "all"):
             r = post_linkedin_with_image(caption, image_bytes)
@@ -1088,8 +1106,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if r.get("success"):
                 _record_post("twitter", r.get("post_url"), caption[:280])
         if platform in ("facebook", "all") and FACEBOOK_ENABLED:
-            r = post_facebook_with_image(caption, image_bytes)
-            lines.append(f"Facebook: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
+            if not fb_page_name and len(FACEBOOK_PAGES) > 1:
+                await update.message.reply_text(f"⚠️ Which Facebook page? Options: {', '.join(p['name'] for p in FACEBOOK_PAGES)}")
+                return
+            r = post_facebook_with_image(caption, image_bytes, fb_page_name)
+            lines.append(f"Facebook ({fb_page_name or FACEBOOK_PAGES[0]['name']}): {'✅' if r['success'] else '❌ ' + r.get('error','')}")
             if r.get("success"):
                 _record_post("facebook", r.get("post_url"), caption)
 
