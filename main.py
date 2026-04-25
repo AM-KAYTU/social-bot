@@ -484,15 +484,15 @@ TOOLS = [
         "name": "post_facebook",
         "description": (
             "Publish a post to a specific Facebook page. "
-            "Always specify which page. Available pages: 'Duty World Hub' (business/entertainment content) "
-            "and 'Health Quarters Ghana' (health show content). "
+            "Always specify which page. "
+            f"Available pages: {', '.join(repr(p['name']) for p in FACEBOOK_PAGES) if FACEBOOK_PAGES else 'none configured'}. "
             "If the user does not say which page, ask before posting."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "text": {"type": "string", "description": "Facebook post content"},
-                "page_name": {"type": "string", "description": "Which Facebook page to post to: 'Duty World Hub' or 'Health Quarters Ghana'"},
+                "page_name": {"type": "string", "description": f"Which Facebook page to post to. Options: {', '.join(repr(p['name']) for p in FACEBOOK_PAGES)}"},
             },
             "required": ["text", "page_name"],
         },
@@ -663,10 +663,10 @@ CONVERSATION MODE: Engage naturally. Ask follow-up questions if needed. When Fii
 PLATFORMS: LinkedIn, X (Twitter), and Facebook. Always ask or infer which platform(s).
 - LinkedIn: longer, story-driven, professional tone
 - X/Twitter: punchy, max 280 characters
-- Facebook — TWO separate pages, always confirm which one before posting:
-  * "Duty World Hub" — the main Duty World business/entertainment page. Use for Duty World brand content, Beat and Sip, business announcements, creative industry topics.
-  * "Health Quarters Ghana" — the official page for the health show. Use ONLY for health-related content, health show updates, wellness topics.
-  If Fiifi says "post on Facebook" without specifying which page, ask: "Which Facebook page — Duty World Hub or Health Quarters Ghana?"
+- Facebook — multiple pages, always confirm which one before posting:
+{chr(10).join(f'  * "{p["name"]}"' for p in FACEBOOK_PAGES) if FACEBOOK_PAGES else "  (no pages configured)"}
+  If Fiifi says "post on Facebook" without specifying which page, ask which one. Never assume.
+  Available page names: {", ".join(f'"{p["name"]}"' for p in FACEBOOK_PAGES) if FACEBOOK_PAGES else "none"}
 - "both" = LinkedIn + X only → use post_both
 - "everywhere" / "all platforms" / "all socials" → use post_all (LinkedIn + X + Facebook — but still ask which Facebook page)
 
