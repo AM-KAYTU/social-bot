@@ -879,7 +879,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != MY_TELEGRAM_ID:
         await update.message.reply_text("⛔ Unauthorized")
         return
-    await process_instruction(update.message.text, update, context)
+
+    text = update.message.text.strip()
+
+    # ── Token exchange helper ─────────────────────────────────────────────────
+    if text.lower().startswith("exchangetoken:"):
+        short_token = text[len("exchangetoken:"):].strip()
+        await update.message.reply_text("⏳ Exchanging token...")
+        try:
+            app_id     = "888495047594958"
+            app_secret = "d9d9440ea319170fc42e8067a2c45c2c"
+
+            # Step 1: exchange for long-lived user token
+            r1 = requests.get("https://graph.facebook.com/oauth/access_token", params={
+                "grant_type": "fb_exchange_token",
+                "client_id": app_id,
+                "client_secret": app_secret,
+                "fb_exchange_token": short_token,
+            })
+            if r1.status_code != 200:
+                await update.message.reply_text(f"❌ Exchange failed: {r1.text}")
+                return
+            long_token = r1.json().get("access_token", "")
+            await update.message.reply_text(f"✅ Long-lived User Token (60 days):\n`{long_token}`")
+
+            # Step 2: get page access tokens
+            r2 = requests.get("https://graph.facebook.com/me/accounts", params={"access_token": long_token})
+            if r2.status_code != 200:
+                await update.message.reply_text(f"❌ me/accounts failed: {r2.text}")
+                return
+            pages = r2.json().get("data", [])
+            lines = ["✅ Page Access Tokens (never expire):\n"]
+            for p in pages:
+                lines.append(f"📄 {p.get('name')}\nID: {p.get('id')}\nToken: `{p.get('access_token')}`\n")
+            await update.message.reply_text("\n".join(lines))
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {e}")
+        return
+
+    await process_instruction(text, update, context)
 
 
 def _record_post(platform: str, url: str | None, text: str):
