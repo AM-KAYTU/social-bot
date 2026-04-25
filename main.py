@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import base64
 import tempfile
 import threading
 import requests
@@ -625,6 +626,84 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_instruction(update.message.text, update, context)
 
 
+def fetch_recent_linkedin_posts(count: int = 20) -> list:
+    r = requests.get(
+        "https://api.linkedin.com/v2/ugcPosts",
+        params={"q": "authors", "authors": f"List(urn:li:person:{LINKEDIN_URN})", "count": count},
+        headers={
+            "Authorization": f"Bearer {LINKEDIN_TOKEN}",
+            "X-Restli-Protocol-Version": "2.0.0",
+        },
+    )
+    if r.status_code == 200:
+        return r.json().get("elements", [])
+    return []
+
+
+def fetch_recent_tweets(count: int = 20) -> list:
+    try:
+        me = twitter_v2.get_me()
+        result = twitter_v2.get_users_tweets(me.data.id, max_results=count, tweet_fields=["text"])
+        return result.data or []
+    except Exception:
+        return []
+
+
+def find_post_url_by_content(post_text: str, platform: str) -> str | None:
+    """Match post_text against recent posts and return the post URL if found."""
+    needle = post_text.strip().lower()[:80]
+    if platform == "linkedin":
+        for post in fetch_recent_linkedin_posts():
+            try:
+                text = post["specificContent"]["com.linkedin.ugc.ShareContent"]["shareCommentary"]["text"]
+                if needle in text.lower() or text.lower()[:80] in needle:
+                    urn = post["id"]
+                    return f"https://www.linkedin.com/feed/update/{urn}/"
+            except (KeyError, TypeError):
+                continue
+    elif platform in ("twitter", "x"):
+        for tweet in fetch_recent_tweets():
+            if needle in tweet.text.lower() or tweet.text.lower()[:80] in needle:
+                return f"https://x.com/i/status/{tweet.id}"
+    return None
+
+
+def vision_identify_post(image_bytes: bytes) -> dict:
+    """Use Claude Vision to extract URL, platform, and post text from a screenshot."""
+    image_b64 = base64.b64encode(image_bytes).decode()
+    resp = claude.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=600,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64},
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "This is a screenshot of a social media post. Extract:\n"
+                        "1. The exact URL of the post if visible anywhere (browser address bar, share button area, etc.)\n"
+                        "2. The platform: linkedin or twitter\n"
+                        "3. The full text content of the post\n\n"
+                        "Return ONLY valid JSON with no explanation:\n"
+                        "{\"url\": \"https://...\", \"platform\": \"linkedin\", \"post_text\": \"...\"}\n"
+                        "Set url to null if not visible."
+                    ),
+                },
+            ],
+        }],
+    )
+    raw = next((b.text for b in resp.content if hasattr(b, "text")), "{}")
+    try:
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        return json.loads(m.group(0)) if m else {}
+    except Exception:
+        return {}
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_user.id) != MY_TELEGRAM_ID:
         await update.message.reply_text("⛔ Unauthorized")
@@ -633,7 +712,50 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
     cap_lower = caption.lower()
 
-    # Detect platform from caption keywords
+    # Download image first — needed for both posting and vision analysis
+    try:
+        photo_file = await context.bot.get_file(update.message.photo[-1].file_id)
+        image_bytes = bytes(await photo_file.download_as_bytearray())
+    except Exception as e:
+        await update.message.reply_text(f"❌ Could not download image: {e}")
+        return
+
+    # ── Edit / Delete flow triggered by screenshot ────────────────────────────
+    _edit_words   = ["edit", "update", "change", "fix", "modify", "rewrite", "correct"]
+    _delete_words = ["delete", "remove", "take down", "take it down", "pull down"]
+    is_edit   = any(w in cap_lower for w in _edit_words)
+    is_delete = any(w in cap_lower for w in _delete_words)
+
+    if is_edit or is_delete:
+        await update.message.reply_text("🔍 Reading the screenshot, hold on...")
+        info = vision_identify_post(image_bytes)
+        url      = info.get("url")
+        platform = (info.get("platform") or "linkedin").lower().replace("x", "twitter")
+        post_text = info.get("post_text", "")
+
+        # If vision didn't find a URL, search recent posts by content
+        if not url and post_text:
+            url = find_post_url_by_content(post_text, platform)
+
+        if url:
+            if is_delete:
+                instruction = f"Delete the {platform} post at this URL: {url}"
+            else:
+                instruction = (
+                    f"The {platform} post URL is: {url}\n"
+                    f"Post text: {post_text}\n\n"
+                    f"User instruction: {caption}"
+                )
+            await process_instruction(instruction, update, context)
+        else:
+            await update.message.reply_text(
+                "❌ I could see the post but couldn't pinpoint its exact location to act on it.\n\n"
+                "Try taking the screenshot with the address bar visible at the top, or on the LinkedIn/X app: "
+                "tap the three dots (⋯) on the post → Share → Copy link, then paste it here with your instruction."
+            )
+        return
+
+    # ── Regular photo post flow ───────────────────────────────────────────────
     if any(w in cap_lower for w in ["tweet", "on x", "twitter", "on twitter"]):
         platform = "twitter"
     elif any(w in cap_lower for w in ["both", "everywhere", "all platforms"]):
@@ -644,9 +766,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏳ Uploading image to {platform.replace('both', 'LinkedIn + X')}...")
 
     try:
-        photo_file = await context.bot.get_file(update.message.photo[-1].file_id)
-        image_bytes = bytes(await photo_file.download_as_bytearray())
-
         if not caption:
             resp = claude.messages.create(
                 model="claude-haiku-4-5-20251001",
