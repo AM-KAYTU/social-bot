@@ -219,13 +219,13 @@ def reply_to_tweet(tweet_url: str, reply_text: str) -> dict:
 
 # ── Scheduled post executor ───────────────────────────────────────────────────
 
-async def execute_scheduled_post(bot, chat_id: int, text: str, platform: str):
+async def execute_scheduled_post(bot, chat_id: int, text: str, platform: str, twitter_text: str = ""):
     lines = []
     if platform in ("linkedin", "both"):
         r = post_linkedin(text)
         lines.append(f"LinkedIn: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
     if platform in ("twitter", "both"):
-        r = post_tweet(text)
+        r = post_tweet(twitter_text or text[:280])
         lines.append(f"X: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
     await bot.send_message(chat_id=chat_id, text="Scheduled post fired!\n" + "\n".join(lines))
 
@@ -291,13 +291,15 @@ TOOLS = [
         "description": (
             "Save a post as a draft for the user to review before posting. "
             "Use when the user says 'draft', 'show me first', 'write but don't post'. "
-            "Always show the full draft in your reply and tell the user: "
+            "When platform is 'both', provide SEPARATE text for each platform in linkedin_text and twitter_text — do NOT combine them into one string. "
+            "Always show the full draft(s) in your reply and tell the user: "
             "'post it' to publish, 'cancel' to discard, or describe edits."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "The drafted content"},
+                "text": {"type": "string", "description": "The post content. For platform='both', this is the LinkedIn version."},
+                "twitter_text": {"type": "string", "description": "The X/Twitter version (max 280 chars). Only required when platform='both'."},
                 "platform": {
                     "type": "string",
                     "enum": ["linkedin", "twitter", "both"],
@@ -311,12 +313,14 @@ TOOLS = [
         "name": "schedule_post",
         "description": (
             "Schedule a post for a specific future time. "
-            "Parse natural language like 'tomorrow at 9am' into ISO 8601. Ghana is UTC+0."
+            "Parse natural language like 'tomorrow at 9am' into ISO 8601. Ghana is UTC+0. "
+            "When platform is 'both', provide SEPARATE text for each platform — text for LinkedIn, twitter_text for X."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "text": {"type": "string"},
+                "text": {"type": "string", "description": "Post content. For platform='both', this is the LinkedIn version."},
+                "twitter_text": {"type": "string", "description": "X/Twitter version (max 280 chars). Only for platform='both'."},
                 "schedule_time": {"type": "string", "description": "ISO 8601 datetime, e.g. 2026-04-25T09:00:00"},
                 "platform": {
                     "type": "string",
@@ -353,7 +357,7 @@ TOOLS:
 - save_draft: hold for approval — show full draft, tell user "post it" / "cancel" / describe edits
 - schedule_post: schedule for future — parse natural language time, specify platform
 
-FORMATTING: Never use dashes, hyphens, or horizontal rules (—, -, ---) anywhere in posts. Never use bullet points unless specifically asked. Write in natural flowing paragraphs like a real person talking.
+FORMATTING: Never use dashes, hyphens, or horizontal rules (—, -, ---, ──) anywhere in posts. Never use bullet points unless specifically asked. Write in natural flowing paragraphs like a real person talking. NEVER include labels like "LinkedIn version:", "X version:", "Twitter version:", or any separator text between versions — each platform gets its own clean post with nothing but the post content itself.
 Post raw text as-is if given. Write it if described. Never post without being explicitly asked."""
 
 # ── Bot handlers ──────────────────────────────────────────────────────────────
@@ -381,9 +385,13 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
                 r = post_linkedin(draft["text"])
                 lines.append(f"LinkedIn: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
             if platform in ("twitter", "both"):
-                r = post_tweet(draft["text"])
+                tw_text = draft.get("twitter_text", draft["text"][:280])
+                r = post_tweet(tw_text)
                 lines.append(f"X: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
-            await update.message.reply_text("\n".join(lines) + f"\n\n{draft['text']}")
+            summary = draft["text"]
+            if platform == "both" and draft.get("twitter_text"):
+                summary = f"LinkedIn:\n{draft['text']}\n\nX:\n{draft['twitter_text']}"
+            await update.message.reply_text("\n".join(lines) + f"\n\n{summary}")
             return
         elif user_lower in ["cancel", "discard", "no", "stop", "delete it"]:
             context.user_data.pop("pending_draft")
@@ -441,11 +449,13 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
                         result = post_linkedin_comment(block.input["post_url"], block.input["comment_text"])
 
                     elif block.name == "save_draft":
+                        platform = block.input.get("platform", "linkedin")
                         context.user_data["pending_draft"] = {
                             "text": block.input["text"],
-                            "platform": block.input.get("platform", "linkedin"),
+                            "twitter_text": block.input.get("twitter_text", block.input["text"][:280]),
+                            "platform": platform,
                         }
-                        result = {"success": True, "message": "Draft saved. Show full draft to user and tell them: 'post it' to publish, 'cancel' to discard, or describe edits."}
+                        result = {"success": True, "message": "Draft saved. Show full draft(s) to user and tell them: 'post it' to publish, 'cancel' to discard, or describe edits."}
 
                     elif block.name == "schedule_post":
                         try:
@@ -455,7 +465,7 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
                                 execute_scheduled_post,
                                 "date",
                                 run_date=run_time,
-                                args=[context.bot, update.effective_chat.id, block.input["text"], platform],
+                                args=[context.bot, update.effective_chat.id, block.input["text"], platform, block.input.get("twitter_text", "")],
                             )
                             result = {
                                 "success": True,
