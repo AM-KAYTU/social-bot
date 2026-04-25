@@ -41,6 +41,16 @@ scheduler = AsyncIOScheduler()
 # In-memory log of every post made through the bot (platform, url, text)
 _post_history: list[dict] = []
 
+# Facebook
+FACEBOOK_PAGE_TOKEN = os.environ.get("FACEBOOK_PAGE_TOKEN", "")
+FACEBOOK_PAGE_ID    = os.environ.get("FACEBOOK_PAGE_ID", "")
+FACEBOOK_ENABLED    = bool(FACEBOOK_PAGE_TOKEN and FACEBOOK_PAGE_ID)
+GRAPH_API           = "https://graph.facebook.com/v19.0"
+if FACEBOOK_ENABLED:
+    print("✅ Facebook enabled")
+else:
+    print("⚠️  Facebook not configured — set FACEBOOK_PAGE_TOKEN and FACEBOOK_PAGE_ID to enable")
+
 # Twitter / X
 _tw_api_key        = os.environ["TWITTER_API_KEY"]
 _tw_api_secret     = os.environ["TWITTER_API_SECRET"]
@@ -239,6 +249,95 @@ def delete_linkedin_post(post_url: str) -> dict:
     return {"success": False, "error": r.text}
 
 
+# ── Facebook functions ───────────────────────────────────────────────────────
+
+def _fb_headers() -> dict:
+    return {"Content-Type": "application/json"}
+
+
+def _extract_facebook_post_id(url_or_id: str) -> str | None:
+    """Extract composite post ID (page_localid) from a URL or return raw ID."""
+    # permalink.php?story_fbid=XXX&id=YYY  →  YYY_XXX
+    sfbid = re.search(r'story_fbid=(\d+)', url_or_id)
+    sid   = re.search(r'[?&]id=(\d+)', url_or_id)
+    if sfbid and sid:
+        return f"{sid.group(1)}_{sfbid.group(1)}"
+    # /posts/XXX or /videos/XXX
+    m = re.search(r'/(?:posts|videos|photos)/(\d+)', url_or_id)
+    if m:
+        return f"{FACEBOOK_PAGE_ID}_{m.group(1)}" if FACEBOOK_PAGE_ID else m.group(1)
+    # Raw composite ID like 123_456 or plain digits
+    clean = url_or_id.strip()
+    if re.match(r'^\d+_\d+$', clean) or re.match(r'^\d+$', clean):
+        return clean
+    return None
+
+
+def post_facebook(text: str) -> dict:
+    r = requests.post(
+        f"{GRAPH_API}/{FACEBOOK_PAGE_ID}/feed",
+        json={"message": text, "access_token": FACEBOOK_PAGE_TOKEN},
+    )
+    if r.status_code == 200:
+        data = r.json()
+        post_id = data.get("id", "")
+        local_id = post_id.split("_")[-1] if "_" in post_id else post_id
+        post_url = f"https://www.facebook.com/permalink.php?story_fbid={local_id}&id={FACEBOOK_PAGE_ID}" if local_id else None
+        return {"success": True, "message": "Posted to Facebook", "post_url": post_url, "post_id": post_id}
+    return {"success": False, "error": r.text}
+
+
+def post_facebook_with_image(text: str, image_bytes: bytes) -> dict:
+    r = requests.post(
+        f"{GRAPH_API}/{FACEBOOK_PAGE_ID}/photos",
+        data={"caption": text, "access_token": FACEBOOK_PAGE_TOKEN},
+        files={"source": ("image.jpg", image_bytes, "image/jpeg")},
+    )
+    if r.status_code == 200:
+        data = r.json()
+        post_id = data.get("post_id", data.get("id", ""))
+        local_id = post_id.split("_")[-1] if "_" in post_id else post_id
+        post_url = f"https://www.facebook.com/permalink.php?story_fbid={local_id}&id={FACEBOOK_PAGE_ID}" if local_id else None
+        return {"success": True, "message": "Posted to Facebook with image", "post_url": post_url, "post_id": post_id}
+    return {"success": False, "error": r.text}
+
+
+def edit_facebook_post(post_url: str, new_text: str) -> dict:
+    post_id = _extract_facebook_post_id(post_url)
+    if not post_id:
+        return {"success": False, "error": "Could not identify the Facebook post. Paste the full post URL."}
+    r = requests.post(
+        f"{GRAPH_API}/{post_id}",
+        json={"message": new_text, "access_token": FACEBOOK_PAGE_TOKEN},
+    )
+    if r.status_code == 200:
+        return {"success": True, "message": "Facebook post updated"}
+    return {"success": False, "error": r.text}
+
+
+def delete_facebook_post(post_url: str) -> dict:
+    post_id = _extract_facebook_post_id(post_url)
+    if not post_id:
+        return {"success": False, "error": "Could not identify the Facebook post. Paste the full post URL."}
+    r = requests.delete(
+        f"{GRAPH_API}/{post_id}",
+        params={"access_token": FACEBOOK_PAGE_TOKEN},
+    )
+    if r.status_code == 200:
+        return {"success": True, "message": "Facebook post deleted"}
+    return {"success": False, "error": r.text}
+
+
+def fetch_recent_facebook_posts(count: int = 20) -> list:
+    r = requests.get(
+        f"{GRAPH_API}/{FACEBOOK_PAGE_ID}/feed",
+        params={"fields": "id,message,created_time", "limit": count, "access_token": FACEBOOK_PAGE_TOKEN},
+    )
+    if r.status_code == 200:
+        return r.json().get("data", [])
+    return []
+
+
 # ── X / Twitter functions ─────────────────────────────────────────────────────
 
 def post_tweet(text: str) -> dict:
@@ -335,8 +434,17 @@ TOOLS = [
         },
     },
     {
+        "name": "post_facebook",
+        "description": "Publish a post on Facebook immediately.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "Facebook post content"}},
+            "required": ["text"],
+        },
+    },
+    {
         "name": "post_both",
-        "description": "Publish on both LinkedIn and X at the same time. Write platform-appropriate versions: LinkedIn can be longer and story-driven; X must be under 280 characters.",
+        "description": "Publish on both LinkedIn and X (Twitter) at the same time. Write platform-appropriate versions: LinkedIn can be longer and story-driven; X must be under 280 characters.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -344,6 +452,19 @@ TOOLS = [
                 "twitter_text": {"type": "string", "description": "Tweet text, max 280 chars"},
             },
             "required": ["linkedin_text", "twitter_text"],
+        },
+    },
+    {
+        "name": "post_all",
+        "description": "Publish on LinkedIn, X (Twitter), AND Facebook all at once. Write a separate version for each platform. Use when user says 'everywhere', 'all platforms', 'all socials', or explicitly names all three.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "linkedin_text": {"type": "string", "description": "LinkedIn post content — can be longer and story-driven"},
+                "twitter_text": {"type": "string", "description": "Tweet text — max 280 characters"},
+                "facebook_text": {"type": "string", "description": "Facebook post content — conversational, can include emojis"},
+            },
+            "required": ["linkedin_text", "twitter_text", "facebook_text"],
         },
     },
     {
@@ -405,6 +526,29 @@ TOOLS = [
         },
     },
     {
+        "name": "edit_facebook_post",
+        "description": "Edit/update the text of an existing Facebook post. Ask for the post URL if not provided.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "post_url": {"type": "string", "description": "Full Facebook post URL or post ID"},
+                "new_text": {"type": "string", "description": "The updated post content"},
+            },
+            "required": ["post_url", "new_text"],
+        },
+    },
+    {
+        "name": "delete_facebook_post",
+        "description": "Permanently delete a Facebook post. Ask for the post URL if not provided. Confirm with user before deleting.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "post_url": {"type": "string", "description": "Full Facebook post URL or post ID"},
+            },
+            "required": ["post_url"],
+        },
+    },
+    {
         "name": "save_draft",
         "description": (
             "Save a post as a draft for the user to review before posting. "
@@ -461,24 +605,30 @@ YOUR ROLE: You are Fiifi's voice online. He can talk to you about anything — b
 
 CONVERSATION MODE: Engage naturally. Ask follow-up questions if needed. When Fiifi says "post that", "write a post about this", or similar, craft a post from the conversation context.
 
-PLATFORMS: LinkedIn and X (Twitter). Always ask or infer which platform.
-- LinkedIn: longer, story-driven, professional
+PLATFORMS: LinkedIn, X (Twitter), and Facebook. Always ask or infer which platform(s).
+- LinkedIn: longer, story-driven, professional tone
 - X/Twitter: punchy, max 280 characters
-- "both" / "everywhere": use post_both
+- Facebook: conversational, warm, can use emojis naturally
+- "both" = LinkedIn + X only → use post_both
+- "everywhere" / "all platforms" / "all socials" → use post_all (LinkedIn + X + Facebook)
 
 TOOLS:
 - post_linkedin: post to LinkedIn now
 - post_tweet: post to X now (max 280 chars)
-- post_both: post to LinkedIn AND X simultaneously
+- post_facebook: post to Facebook now
+- post_both: post to LinkedIn AND X simultaneously (separate text for each)
+- post_all: post to LinkedIn, X, AND Facebook simultaneously (separate text for each)
 - reply_to_tweet: reply to a tweet (ask for URL if not given)
 - post_linkedin_comment: comment on a LinkedIn post (ask for URL if not given)
-- edit_linkedin_post: update the text of an existing LinkedIn post (ask for post URL)
-- delete_linkedin_post: permanently delete a LinkedIn post (ask for post URL, confirm first)
-- delete_tweet: permanently delete a tweet (ask for tweet URL, confirm first; X does not support editing tweets via API — delete and repost instead)
+- edit_linkedin_post: update an existing LinkedIn post (ask for post URL)
+- delete_linkedin_post: permanently delete a LinkedIn post (confirm first)
+- delete_tweet: permanently delete a tweet (confirm first; X does not support editing via API — delete and repost)
+- edit_facebook_post: update an existing Facebook post (ask for post URL)
+- delete_facebook_post: permanently delete a Facebook post (confirm first)
 - save_draft: hold for approval — show full draft, tell user "post it" / "cancel" / describe edits
 - schedule_post: schedule for future — parse natural language time, specify platform
 
-FORMATTING: Never use dashes, hyphens, or horizontal rules (—, -, ---, ──) anywhere in posts. Never use bullet points unless specifically asked. Write in natural flowing paragraphs like a real person talking. NEVER include labels like "LinkedIn version:", "X version:", "Twitter version:", or any separator text between versions — each platform gets its own clean post with nothing but the post content itself.
+FORMATTING: Never use dashes, hyphens, or horizontal rules (—, -, ---, ──) anywhere in posts. Never use bullet points unless specifically asked. Write in natural flowing paragraphs like a real person talking. NEVER include labels like "LinkedIn version:", "X version:", "Facebook version:", or any separator text between versions — each platform gets its own clean post with nothing but the post content itself.
 Post raw text as-is if given. Write it if described. Never post without being explicitly asked."""
 
 # ── Bot handlers ──────────────────────────────────────────────────────────────
@@ -562,6 +712,11 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
                         if result.get("success"):
                             _record_post("twitter", result.get("post_url"), block.input["text"])
 
+                    elif block.name == "post_facebook":
+                        result = post_facebook(block.input["text"])
+                        if result.get("success"):
+                            _record_post("facebook", result.get("post_url"), block.input["text"])
+
                     elif block.name == "post_both":
                         r_li = post_linkedin(block.input["linkedin_text"])
                         r_tw = post_tweet(block.input["twitter_text"])
@@ -573,6 +728,21 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
                             "success": r_li["success"] or r_tw["success"],
                             "linkedin": r_li,
                             "twitter": r_tw,
+                        }
+
+                    elif block.name == "post_all":
+                        r_li = post_linkedin(block.input["linkedin_text"])
+                        r_tw = post_tweet(block.input["twitter_text"])
+                        r_fb = post_facebook(block.input["facebook_text"]) if FACEBOOK_ENABLED else {"success": False, "error": "Facebook not configured"}
+                        if r_li.get("success"):
+                            _record_post("linkedin", r_li.get("post_url"), block.input["linkedin_text"])
+                        if r_tw.get("success"):
+                            _record_post("twitter", r_tw.get("post_url"), block.input["twitter_text"])
+                        if r_fb.get("success"):
+                            _record_post("facebook", r_fb.get("post_url"), block.input["facebook_text"])
+                        result = {
+                            "success": any(r.get("success") for r in [r_li, r_tw, r_fb]),
+                            "linkedin": r_li, "twitter": r_tw, "facebook": r_fb,
                         }
 
                     elif block.name == "reply_to_tweet":
@@ -589,6 +759,12 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
 
                     elif block.name == "delete_tweet":
                         result = delete_tweet(block.input["tweet_url"])
+
+                    elif block.name == "edit_facebook_post":
+                        result = edit_facebook_post(block.input["post_url"], block.input["new_text"])
+
+                    elif block.name == "delete_facebook_post":
+                        result = delete_facebook_post(block.input["post_url"])
 
                     elif block.name == "save_draft":
                         platform = block.input.get("platform", "linkedin")
@@ -719,6 +895,14 @@ def find_post_url_by_content(post_text: str, platform: str) -> str | None:
         except Exception:
             pass
 
+    elif platform == "facebook" and FACEBOOK_ENABLED:
+        for post in fetch_recent_facebook_posts():
+            msg = post.get("message", "")
+            if msg and _word_overlap(post_text, msg) >= 0.35:
+                post_id = post.get("id", "")
+                local_id = post_id.split("_")[-1] if "_" in post_id else post_id
+                return f"https://www.facebook.com/permalink.php?story_fbid={local_id}&id={FACEBOOK_PAGE_ID}"
+
     return None
 
 
@@ -812,12 +996,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Regular photo post flow ───────────────────────────────────────────────
     if any(w in cap_lower for w in ["tweet", "on x", "twitter", "on twitter"]):
         platform = "twitter"
-    elif any(w in cap_lower for w in ["both", "everywhere", "all platforms"]):
+    elif any(w in cap_lower for w in ["facebook", "fb", "on facebook"]):
+        platform = "facebook"
+    elif any(w in cap_lower for w in ["everywhere", "all platforms", "all socials"]):
+        platform = "all"
+    elif any(w in cap_lower for w in ["both"]):
         platform = "both"
     else:
         platform = "linkedin"
 
-    await update.message.reply_text(f"⏳ Uploading image to {platform.replace('both', 'LinkedIn + X')}...")
+    label = {"both": "LinkedIn + X", "all": "LinkedIn + X + Facebook", "facebook": "Facebook"}.get(platform, platform.title())
+    await update.message.reply_text(f"⏳ Uploading image to {label}...")
 
     try:
         if not caption:
@@ -825,21 +1014,26 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 model="claude-haiku-4-5-20251001",
                 max_tokens=300,
                 system=get_system(),
-                messages=[{"role": "user", "content": "Write a short LinkedIn caption for a photo I'm posting. Keep it on-brand for Duty World — creative, bold, professional. Just the caption text, nothing else."}],
+                messages=[{"role": "user", "content": "Write a short caption for a photo I'm posting. Keep it on-brand for Duty World — creative, bold, professional. Just the caption text, nothing else."}],
             )
             caption = next((b.text for b in resp.content if hasattr(b, "text")), "")
 
         lines = []
-        if platform in ("linkedin", "both"):
+        if platform in ("linkedin", "both", "all"):
             r = post_linkedin_with_image(caption, image_bytes)
             lines.append(f"LinkedIn: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
             if r.get("success"):
                 _record_post("linkedin", r.get("post_url"), caption)
-        if platform in ("twitter", "both"):
+        if platform in ("twitter", "both", "all"):
             r = post_tweet_with_image(caption[:280], image_bytes)
             lines.append(f"X: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
             if r.get("success"):
                 _record_post("twitter", r.get("post_url"), caption[:280])
+        if platform in ("facebook", "all") and FACEBOOK_ENABLED:
+            r = post_facebook_with_image(caption, image_bytes)
+            lines.append(f"Facebook: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
+            if r.get("success"):
+                _record_post("facebook", r.get("post_url"), caption)
 
         await update.message.reply_text("\n".join(lines) + f"\n\nCaption:\n{caption}")
 
