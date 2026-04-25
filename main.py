@@ -41,29 +41,23 @@ scheduler = AsyncIOScheduler()
 # In-memory log of every post made through the bot (platform, url, text)
 _post_history: list[dict] = []
 
-# Facebook — supports multiple pages via FACEBOOK_PAGE_1_TOKEN/ID, FACEBOOK_PAGE_2_TOKEN/ID, etc.
+# Facebook — named pages, each with token/id/name
 GRAPH_API      = "https://graph.facebook.com/v19.0"
-FACEBOOK_PAGES = []
+FACEBOOK_PAGES: list[dict] = []
 for _i in range(1, 20):
     _t = os.environ.get(f"FACEBOOK_PAGE_{_i}_TOKEN", "")
     _p = os.environ.get(f"FACEBOOK_PAGE_{_i}_ID", "")
+    _n = os.environ.get(f"FACEBOOK_PAGE_{_i}_NAME", f"Page {_i}")
     if _t and _p:
-        FACEBOOK_PAGES.append({"token": _t, "id": _p})
+        FACEBOOK_PAGES.append({"token": _t, "id": _p, "name": _n})
     else:
         break
-# Legacy single-page fallback
-_legacy_token = os.environ.get("FACEBOOK_PAGE_TOKEN", "")
-_legacy_id    = os.environ.get("FACEBOOK_PAGE_ID", "")
-if _legacy_token and _legacy_id and not FACEBOOK_PAGES:
-    FACEBOOK_PAGES.append({"token": _legacy_token, "id": _legacy_id})
 FACEBOOK_ENABLED = bool(FACEBOOK_PAGES)
-# Convenience aliases for single-page functions that still need them
-FACEBOOK_PAGE_TOKEN = FACEBOOK_PAGES[0]["token"] if FACEBOOK_PAGES else ""
-FACEBOOK_PAGE_ID    = FACEBOOK_PAGES[0]["id"]    if FACEBOOK_PAGES else ""
 if FACEBOOK_ENABLED:
-    print(f"✅ Facebook enabled — {len(FACEBOOK_PAGES)} page(s)")
+    for _pg in FACEBOOK_PAGES:
+        print(f"✅ Facebook page: {_pg['name']} ({_pg['id']})")
 else:
-    print("⚠️  Facebook not configured — add FACEBOOK_PAGE_1_TOKEN and FACEBOOK_PAGE_1_ID to enable")
+    print("⚠️  Facebook not configured — add FACEBOOK_PAGE_1_TOKEN, FACEBOOK_PAGE_1_ID, FACEBOOK_PAGE_1_NAME")
 
 # Twitter / X
 _tw_api_key        = os.environ["TWITTER_API_KEY"]
@@ -295,52 +289,57 @@ def _fb_post_url(post_id: str, page_id: str) -> str | None:
 
 
 def _fb_token_for_post_id(post_id: str) -> str:
-    """Return the right page token based on page ID prefix in the composite post ID."""
     for page in FACEBOOK_PAGES:
         if post_id.startswith(page["id"]):
             return page["token"]
     return FACEBOOK_PAGES[0]["token"] if FACEBOOK_PAGES else ""
 
 
-def post_facebook(text: str) -> dict:
-    """Post to all configured Facebook pages."""
-    results, first_url = [], None
+def _fb_resolve_page(page_name: str) -> dict | None:
+    """Find a Facebook page by name (fuzzy match)."""
+    needle = page_name.lower().strip()
     for page in FACEBOOK_PAGES:
-        r = requests.post(
-            f"{GRAPH_API}/{page['id']}/feed",
-            json={"message": text, "access_token": page["token"]},
-        )
-        if r.status_code == 200:
-            post_id = r.json().get("id", "")
-            url = _fb_post_url(post_id, page["id"])
-            if not first_url:
-                first_url = url
-            results.append({"success": True, "post_url": url, "post_id": post_id})
-        else:
-            results.append({"success": False, "error": r.text})
-    success = any(r["success"] for r in results)
-    return {"success": success, "message": f"Posted to {sum(r['success'] for r in results)}/{len(FACEBOOK_PAGES)} Facebook page(s)", "post_url": first_url, "results": results}
+        if needle in page["name"].lower() or page["name"].lower() in needle:
+            return page
+    # fallback: partial word match
+    for page in FACEBOOK_PAGES:
+        if any(w in page["name"].lower() for w in needle.split()):
+            return page
+    return None
 
 
-def post_facebook_with_image(text: str, image_bytes: bytes) -> dict:
-    """Post image to all configured Facebook pages."""
-    results, first_url = [], None
-    for page in FACEBOOK_PAGES:
-        r = requests.post(
-            f"{GRAPH_API}/{page['id']}/photos",
-            data={"caption": text, "access_token": page["token"]},
-            files={"source": ("image.jpg", image_bytes, "image/jpeg")},
-        )
-        if r.status_code == 200:
-            post_id = r.json().get("post_id", r.json().get("id", ""))
-            url = _fb_post_url(post_id, page["id"])
-            if not first_url:
-                first_url = url
-            results.append({"success": True, "post_url": url, "post_id": post_id})
-        else:
-            results.append({"success": False, "error": r.text})
-    success = any(r["success"] for r in results)
-    return {"success": success, "message": f"Posted image to {sum(r['success'] for r in results)}/{len(FACEBOOK_PAGES)} Facebook page(s)", "post_url": first_url, "results": results}
+def post_facebook(text: str, page_name: str = "") -> dict:
+    """Post to a specific Facebook page by name, or list available pages if name not matched."""
+    page = _fb_resolve_page(page_name) if page_name else None
+    if not page:
+        names = ", ".join(p["name"] for p in FACEBOOK_PAGES)
+        return {"success": False, "error": f"Please specify which Facebook page: {names}"}
+    r = requests.post(
+        f"{GRAPH_API}/{page['id']}/feed",
+        json={"message": text, "access_token": page["token"]},
+    )
+    if r.status_code == 200:
+        post_id = r.json().get("id", "")
+        url = _fb_post_url(post_id, page["id"])
+        return {"success": True, "message": f"Posted to {page['name']}", "post_url": url, "post_id": post_id}
+    return {"success": False, "error": r.text}
+
+
+def post_facebook_with_image(text: str, image_bytes: bytes, page_name: str = "") -> dict:
+    """Post image to a specific Facebook page by name."""
+    page = _fb_resolve_page(page_name) if page_name else (FACEBOOK_PAGES[0] if FACEBOOK_PAGES else None)
+    if not page:
+        return {"success": False, "error": "No Facebook page configured."}
+    r = requests.post(
+        f"{GRAPH_API}/{page['id']}/photos",
+        data={"caption": text, "access_token": page["token"]},
+        files={"source": ("image.jpg", image_bytes, "image/jpeg")},
+    )
+    if r.status_code == 200:
+        post_id = r.json().get("post_id", r.json().get("id", ""))
+        url = _fb_post_url(post_id, page["id"])
+        return {"success": True, "message": f"Posted image to {page['name']}", "post_url": url, "post_id": post_id}
+    return {"success": False, "error": r.text}
 
 
 def edit_facebook_post(post_url: str, new_text: str) -> dict:
@@ -480,11 +479,19 @@ TOOLS = [
     },
     {
         "name": "post_facebook",
-        "description": "Publish a post on Facebook immediately.",
+        "description": (
+            "Publish a post to a specific Facebook page. "
+            "Always specify which page. Available pages: 'Duty World Hub' (business/entertainment content) "
+            "and 'Health Quarters Ghana' (health show content). "
+            "If the user does not say which page, ask before posting."
+        ),
         "input_schema": {
             "type": "object",
-            "properties": {"text": {"type": "string", "description": "Facebook post content"}},
-            "required": ["text"],
+            "properties": {
+                "text": {"type": "string", "description": "Facebook post content"},
+                "page_name": {"type": "string", "description": "Which Facebook page to post to: 'Duty World Hub' or 'Health Quarters Ghana'"},
+            },
+            "required": ["text", "page_name"],
         },
     },
     {
@@ -653,9 +660,12 @@ CONVERSATION MODE: Engage naturally. Ask follow-up questions if needed. When Fii
 PLATFORMS: LinkedIn, X (Twitter), and Facebook. Always ask or infer which platform(s).
 - LinkedIn: longer, story-driven, professional tone
 - X/Twitter: punchy, max 280 characters
-- Facebook: conversational, warm, can use emojis naturally
+- Facebook — TWO separate pages, always confirm which one before posting:
+  * "Duty World Hub" — the main Duty World business/entertainment page. Use for Duty World brand content, Beat and Sip, business announcements, creative industry topics.
+  * "Health Quarters Ghana" — the official page for the health show. Use ONLY for health-related content, health show updates, wellness topics.
+  If Fiifi says "post on Facebook" without specifying which page, ask: "Which Facebook page — Duty World Hub or Health Quarters Ghana?"
 - "both" = LinkedIn + X only → use post_both
-- "everywhere" / "all platforms" / "all socials" → use post_all (LinkedIn + X + Facebook)
+- "everywhere" / "all platforms" / "all socials" → use post_all (LinkedIn + X + Facebook — but still ask which Facebook page)
 
 TOOLS:
 - post_linkedin: post to LinkedIn now
@@ -758,7 +768,7 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
                             _record_post("twitter", result.get("post_url"), block.input["text"])
 
                     elif block.name == "post_facebook":
-                        result = post_facebook(block.input["text"])
+                        result = post_facebook(block.input["text"], block.input.get("page_name", ""))
                         if result.get("success"):
                             _record_post("facebook", result.get("post_url"), block.input["text"])
 
