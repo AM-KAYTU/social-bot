@@ -99,24 +99,28 @@ print(f"✅ LinkedIn URN fetched: {LINKEDIN_URN}")
 
 # ── LinkedIn functions ────────────────────────────────────────────────────────
 
+_LI_VER = "202401"
+_LI_HEADERS = lambda: {
+    "Authorization": f"Bearer {LINKEDIN_TOKEN}",
+    "Content-Type": "application/json",
+    "LinkedIn-Version": _LI_VER,
+}
+
 def post_linkedin(text: str) -> dict:
     r = requests.post(
-        "https://api.linkedin.com/v2/ugcPosts",
-        headers={
-            "Authorization": f"Bearer {LINKEDIN_TOKEN}",
-            "Content-Type": "application/json",
-            "X-Restli-Protocol-Version": "2.0.0",
-        },
+        "https://api.linkedin.com/rest/posts",
+        headers=_LI_HEADERS(),
         json={
             "author": f"urn:li:person:{LINKEDIN_URN}",
-            "lifecycleState": "PUBLISHED",
-            "specificContent": {
-                "com.linkedin.ugc.ShareContent": {
-                    "shareCommentary": {"text": text},
-                    "shareMediaCategory": "NONE",
-                }
+            "commentary": text,
+            "visibility": "PUBLIC",
+            "distribution": {
+                "feedDistribution": "MAIN_FEED",
+                "targetEntities": [],
+                "thirdPartyDistributionChannels": [],
             },
-            "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+            "lifecycleState": "PUBLISHED",
+            "isReshareDisabledByAuthor": False,
         },
     )
     if r.status_code == 201:
@@ -128,50 +132,39 @@ def post_linkedin(text: str) -> dict:
 
 def post_linkedin_with_image(text: str, image_bytes: bytes) -> dict:
     reg = requests.post(
-        "https://api.linkedin.com/v2/assets?action=registerUpload",
-        headers={"Authorization": f"Bearer {LINKEDIN_TOKEN}", "Content-Type": "application/json"},
-        json={
-            "registerUploadRequest": {
-                "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
-                "owner": f"urn:li:person:{LINKEDIN_URN}",
-                "serviceRelationships": [{"relationshipType": "OWNER", "identifier": "urn:li:userGeneratedContent"}],
-            }
-        },
+        "https://api.linkedin.com/rest/images?action=initializeUpload",
+        headers=_LI_HEADERS(),
+        json={"initializeUploadRequest": {"owner": f"urn:li:person:{LINKEDIN_URN}"}},
     )
     if reg.status_code != 200:
-        return {"success": False, "error": f"Register upload failed: {reg.text}"}
+        return {"success": False, "error": f"Image upload init failed: {reg.text}"}
 
-    upload_url = reg.json()["value"]["uploadMechanism"][
-        "com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"
-    ]["uploadUrl"]
-    asset_urn = reg.json()["value"]["asset"]
+    upload_url = reg.json()["value"]["uploadUrl"]
+    image_urn = reg.json()["value"]["image"]
 
     up = requests.put(
         upload_url,
         headers={"Authorization": f"Bearer {LINKEDIN_TOKEN}", "Content-Type": "image/jpeg"},
         data=image_bytes,
     )
-    if up.status_code not in [200, 201]:
-        return {"success": False, "error": f"Image upload failed: {up.text}"}
+    if up.status_code not in (200, 201):
+        return {"success": False, "error": f"Image upload failed: {up.status_code}"}
 
     r = requests.post(
-        "https://api.linkedin.com/v2/ugcPosts",
-        headers={
-            "Authorization": f"Bearer {LINKEDIN_TOKEN}",
-            "Content-Type": "application/json",
-            "X-Restli-Protocol-Version": "2.0.0",
-        },
+        "https://api.linkedin.com/rest/posts",
+        headers=_LI_HEADERS(),
         json={
             "author": f"urn:li:person:{LINKEDIN_URN}",
-            "lifecycleState": "PUBLISHED",
-            "specificContent": {
-                "com.linkedin.ugc.ShareContent": {
-                    "shareCommentary": {"text": text},
-                    "shareMediaCategory": "IMAGE",
-                    "media": [{"status": "READY", "description": {"text": ""}, "media": asset_urn, "title": {"text": ""}}],
-                }
+            "commentary": text,
+            "visibility": "PUBLIC",
+            "distribution": {
+                "feedDistribution": "MAIN_FEED",
+                "targetEntities": [],
+                "thirdPartyDistributionChannels": [],
             },
-            "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+            "lifecycleState": "PUBLISHED",
+            "isReshareDisabledByAuthor": False,
+            "content": {"media": {"id": image_urn, "altText": ""}},
         },
     )
     if r.status_code == 201:
@@ -188,16 +181,12 @@ def post_linkedin_comment(post_url: str, comment_text: str) -> dict:
             post_urn = m.group(0)
             break
     else:
-        return {"success": False, "error": "Could not find post URN in URL. Paste the full URL from your browser (it should contain 'urn:li:ugcPost:...')"}
+        return {"success": False, "error": "Could not find post URN in URL. Paste the full URL from your browser."}
 
     encoded_urn = quote(post_urn, safe="")
     r = requests.post(
-        f"https://api.linkedin.com/v2/socialActions/{encoded_urn}/comments",
-        headers={
-            "Authorization": f"Bearer {LINKEDIN_TOKEN}",
-            "Content-Type": "application/json",
-            "X-Restli-Protocol-Version": "2.0.0",
-        },
+        f"https://api.linkedin.com/rest/socialActions/{encoded_urn}/comments",
+        headers=_LI_HEADERS(),
         json={"actor": f"urn:li:person:{LINKEDIN_URN}", "message": {"text": comment_text}},
     )
     if r.status_code == 201:
@@ -205,7 +194,6 @@ def post_linkedin_comment(post_url: str, comment_text: str) -> dict:
     return {"success": False, "error": r.text}
 
 def _extract_linkedin_urn(post_url: str):
-    """Return (urn, encoded_urn) or raise a user-friendly error string."""
     for candidate in [post_url, unquote(post_url)]:
         m = re.search(r'urn:li:[A-Za-z]+:[0-9]+', candidate)
         if m:
@@ -218,26 +206,12 @@ def edit_linkedin_post(post_url: str, new_text: str) -> dict:
     urn, encoded_urn = _extract_linkedin_urn(post_url)
     if not urn:
         return {"success": False, "error": "Could not find post URN in URL. Paste the full LinkedIn post URL from your browser."}
+    h = _LI_HEADERS()
+    h["X-RestLi-Method"] = "PARTIAL_UPDATE"
     r = requests.post(
-        f"https://api.linkedin.com/v2/ugcPosts/{encoded_urn}",
-        headers={
-            "Authorization": f"Bearer {LINKEDIN_TOKEN}",
-            "Content-Type": "application/json",
-            "X-Restli-Protocol-Version": "2.0.0",
-            "X-HTTP-Method-Override": "PATCH",
-        },
-        json={
-            "patch": {
-                "$set": {
-                    "specificContent": {
-                        "com.linkedin.ugc.ShareContent": {
-                            "shareCommentary": {"text": new_text},
-                            "shareMediaCategory": "NONE",
-                        }
-                    }
-                }
-            }
-        },
+        f"https://api.linkedin.com/rest/posts/{encoded_urn}",
+        headers=h,
+        json={"patch": {"$set": {"commentary": new_text}}},
     )
     if r.status_code in (200, 204):
         return {"success": True, "message": "LinkedIn post updated successfully"}
@@ -249,10 +223,10 @@ def delete_linkedin_post(post_url: str) -> dict:
     if not urn:
         return {"success": False, "error": "Could not find post URN in URL. Paste the full LinkedIn post URL from your browser."}
     r = requests.delete(
-        f"https://api.linkedin.com/v2/ugcPosts/{encoded_urn}",
+        f"https://api.linkedin.com/rest/posts/{encoded_urn}",
         headers={
             "Authorization": f"Bearer {LINKEDIN_TOKEN}",
-            "X-Restli-Protocol-Version": "2.0.0",
+            "LinkedIn-Version": _LI_VER,
         },
     )
     if r.status_code in (200, 204):
