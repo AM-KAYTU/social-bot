@@ -334,18 +334,27 @@ def edit_facebook_post(post_url: str, new_text: str) -> dict:
     return {"success": False, "error": r.text}
 
 
-def delete_facebook_post(post_url: str) -> dict:
+def delete_facebook_post(post_url: str, page_name: str = "") -> dict:
     post_id = _extract_facebook_post_id(post_url)
     if not post_id:
         return {"success": False, "error": "Could not identify the Facebook post. Paste the full post URL."}
-    token = _fb_token_for_post_id(post_id)
+    # Prefer token from explicit page name, fall back to post ID prefix
+    if page_name:
+        page = _fb_resolve_page(page_name)
+        token = page["token"] if page else _fb_token_for_post_id(post_id)
+    else:
+        token = _fb_token_for_post_id(post_id)
     r = requests.delete(
         f"{GRAPH_API}/{post_id}",
         params={"access_token": token},
     )
-    if r.status_code == 200:
+    try:
+        body = r.json()
+    except Exception:
+        body = {}
+    if r.status_code == 200 and body.get("success") is not False:
         return {"success": True, "message": "Facebook post deleted"}
-    return {"success": False, "error": r.text}
+    return {"success": False, "error": f"HTTP {r.status_code}: {r.text}"}
 
 
 def fetch_recent_facebook_posts(count: int = 20) -> list:
@@ -574,6 +583,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "post_url": {"type": "string", "description": "Full Facebook post URL or post ID"},
+                "page_name": {"type": "string", "description": "Name of the Facebook page the post is on (e.g. 'Health Quarters Ghana'). Include whenever known."},
             },
             "required": ["post_url"],
         },
@@ -797,7 +807,7 @@ async def process_instruction(user_text: str, update: Update, context: ContextTy
                         result = edit_facebook_post(block.input["post_url"], block.input["new_text"])
 
                     elif block.name == "delete_facebook_post":
-                        result = delete_facebook_post(block.input["post_url"])
+                        result = delete_facebook_post(block.input["post_url"], block.input.get("page_name", ""))
 
                     elif block.name == "save_draft":
                         platform = block.input.get("platform", "linkedin")
@@ -996,10 +1006,11 @@ def vision_identify_post(image_bytes: bytes) -> dict:
                     "text": (
                         "This is a screenshot of a social media post. Extract:\n"
                         "1. The exact URL if visible anywhere — check the browser address bar carefully.\n"
-                        "2. The platform: linkedin or twitter\n"
-                        "3. The COMPLETE full text of the post body — copy every word exactly as written, do not summarise.\n\n"
+                        "2. The platform: facebook, linkedin, or twitter — look at the UI style and branding.\n"
+                        "3. The COMPLETE full text of the post body — copy every word exactly as written, do not summarise.\n"
+                        "4. The page or account name shown (e.g. 'Health Quarters Ghana', 'Duty World Hub').\n\n"
                         "Return ONLY valid JSON, no explanation:\n"
-                        "{\"url\": \"https://...or null\", \"platform\": \"linkedin\", \"post_text\": \"full text here\"}\n"
+                        "{\"url\": \"https://...or null\", \"platform\": \"facebook\", \"post_text\": \"full text here\", \"page_name\": \"name or null\"}\n"
                         "Set url to null if not visible in the screenshot."
                     ),
                 },
@@ -1039,9 +1050,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_edit or is_delete:
         await update.message.reply_text("🔍 Reading the screenshot, hold on...")
         info = vision_identify_post(image_bytes)
-        url      = info.get("url")
-        platform = (info.get("platform") or "linkedin").lower().replace("x", "twitter")
+        url       = info.get("url")
+        platform  = (info.get("platform") or "facebook").lower().replace("x", "twitter")
         post_text = info.get("post_text", "")
+        # page_name: prefer vision result, fall back to parsing the user's caption
+        page_name = info.get("page_name") or ""
+        if not page_name and caption:
+            detected = _fb_resolve_page(caption)
+            if detected:
+                page_name = detected["name"]
 
         # If vision didn't find a URL, search recent posts by content
         if not url and post_text:
@@ -1049,7 +1066,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if url:
             if is_delete:
-                instruction = f"Delete the {platform} post at this URL: {url}"
+                page_hint = f" on the '{page_name}' page" if page_name else ""
+                instruction = f"Delete the {platform} post{page_hint} at this URL: {url}. The page name is '{page_name}'."
             else:
                 instruction = (
                     f"The {platform} post URL is: {url}\n"
