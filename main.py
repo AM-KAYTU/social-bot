@@ -294,7 +294,7 @@ def post_facebook(text: str, page_name: str = "") -> dict:
         return {"success": False, "error": f"Please specify which Facebook page: {names}"}
     r = requests.post(
         f"{GRAPH_API}/{page['id']}/feed",
-        json={"message": text, "access_token": page["token"]},
+        json={"message": text, "access_token": page["token"], "published": True},
     )
     if r.status_code == 200:
         post_id = r.json().get("id", "")
@@ -310,7 +310,7 @@ def post_facebook_with_image(text: str, image_bytes: bytes, page_name: str = "")
         return {"success": False, "error": "No Facebook page configured."}
     r = requests.post(
         f"{GRAPH_API}/{page['id']}/photos",
-        data={"caption": text, "access_token": page["token"]},
+        data={"caption": text, "access_token": page["token"], "published": "true"},
         files={"source": ("image.jpg", image_bytes, "image/jpeg")},
     )
     if r.status_code == 200:
