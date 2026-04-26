@@ -1100,43 +1100,58 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image_b64 = base64.b64encode(image_bytes).decode()
     image_block = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}
 
+    _caption_system = (
+        "You are a social media caption writer for Duty World, a creative brand based in Accra, Ghana. "
+        "Your job is to write captions. Always write captions directly — never ask questions, "
+        "never request clarification, never explain yourself. Just write the caption text."
+    )
+
     if platform == "all":
-        user_hint = f"\nUser instruction: {caption}" if caption else ""
+        user_hint = f"\nTone/style hint from user: {caption}" if caption else ""
         multi_prompt = (
-            f"Look at this image and write THREE platform-specific captions.{user_hint}\n\n"
-            "Format exactly like this (no extra text before or after):\n"
-            "LINKEDIN: [professional, engaging, 2-4 paragraphs]\n"
-            "TWITTER: [punchy, max 200 chars, no hashtag spam]\n"
+            f"Look at this image and write THREE platform-specific captions for it.{user_hint}\n\n"
+            "Write the captions NOW based on what you see. Do not ask questions.\n\n"
+            "Reply in this exact format only:\n"
+            "LINKEDIN: [professional, 2-4 paragraphs, engaging story]\n"
+            "TWITTER: [punchy, under 200 chars]\n"
             "FACEBOOK: [conversational, friendly, 1-3 short paragraphs]"
         )
         gen_resp = claude.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1000,
-            system=get_system(),
+            system=_caption_system,
             messages=[{"role": "user", "content": [image_block, {"type": "text", "text": multi_prompt}]}],
         )
         raw = next((b.text for b in gen_resp.content if hasattr(b, "text")), "")
 
         def _pull(raw: str, key: str) -> str:
             m = re.search(rf'{key}:\s*(.+?)(?=\n(?:LINKEDIN|TWITTER|FACEBOOK):|$)', raw, re.DOTALL | re.IGNORECASE)
-            return m.group(1).strip() if m else raw.strip()
+            return m.group(1).strip() if m else ""
 
         li_caption = _pull(raw, "LINKEDIN")
         tw_caption = _pull(raw, "TWITTER")[:280]
         fb_caption = _pull(raw, "FACEBOOK")
+
+        # Fallback: if format wasn't followed, use raw as LinkedIn caption and generate shorter variants
+        if not li_caption:
+            li_caption = raw.strip()
+        if not tw_caption:
+            tw_caption = raw.strip()[:280]
+        if not fb_caption:
+            fb_caption = raw.strip()
     else:
         if caption:
             prompt = (
-                f"Look at this image. Write a social media caption for it.\n"
-                f"User instruction: {caption}\n\n"
-                "Write only the caption text. Do NOT include platform names, 'post this', or routing instructions."
+                f"Look at this image. Write a social media caption for it. "
+                f"Tone/style hint: {caption}\n\n"
+                "Write only the caption text. Do NOT include platform names or routing instructions."
             )
         else:
             prompt = "Look at this image and write a short, punchy post caption for it. Keep it on-brand for Duty World — creative, bold, professional. Just the caption text, nothing else."
         gen_resp = claude.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=400,
-            system=get_system(),
+            system=_caption_system,
             messages=[{"role": "user", "content": [image_block, {"type": "text", "text": prompt}]}],
         )
         caption = next((b.text for b in gen_resp.content if hasattr(b, "text")), caption)
