@@ -4,6 +4,7 @@ import re
 import base64
 import tempfile
 import threading
+import time
 import requests
 import anthropic
 import tweepy
@@ -1065,67 +1066,123 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Regular photo post flow ───────────────────────────────────────────────
-    if any(w in cap_lower for w in ["tweet", "on x", "twitter", "on twitter"]):
+
+    # Store image so follow-up text messages can use it (up to 1 hour)
+    context.user_data["last_image_file_id"] = update.message.photo[-1].file_id
+    context.user_data["last_image_bytes"] = image_bytes
+    context.user_data["last_image_time"] = time.time()
+
+    # Platform detection — broad "all" recognition
+    _is_all = (
+        any(w in cap_lower for w in ["everywhere", "every platform", "all platforms", "all socials",
+                                      "all social", "all pages", "all media", "all our"])
+        or ("all" in cap_lower and any(w in cap_lower for w in ["social", "platform", "page", "media", "channel"]))
+    )
+    if any(w in cap_lower for w in ["tweet", "on x", "twitter", "on twitter"]) and not _is_all:
         platform = "twitter"
-    elif any(w in cap_lower for w in ["facebook", "fb", "on facebook"]):
+    elif any(w in cap_lower for w in ["facebook", "fb", "on facebook"]) and not _is_all:
         platform = "facebook"
-    elif any(w in cap_lower for w in ["everywhere", "all platforms", "all socials"]):
+    elif _is_all:
         platform = "all"
-    elif any(w in cap_lower for w in ["both"]):
+    elif any(w in cap_lower for w in ["both", "linkedin and x", "linkedin and twitter"]):
         platform = "both"
     else:
         platform = "linkedin"
 
-    # Detect Facebook page name from caption (before caption gets overwritten)
+    # Detect a specific Facebook page name from caption (only used when platform=facebook)
     fb_page_name = ""
-    if platform in ("facebook", "all") and FACEBOOK_ENABLED and caption:
+    if platform == "facebook" and FACEBOOK_ENABLED and caption:
         detected = _fb_resolve_page(caption)
         if detected:
             fb_page_name = detected["name"]
 
-    # Generate caption using Claude Vision (so it can actually see the image)
-    _instruction_signals = ["post it on", "post on", "caption it", "write a caption", "share it on", "post this on", "caption this"]
+    # Generate captions using Claude Vision
     image_b64 = base64.b64encode(image_bytes).decode()
     image_block = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}
 
-    if caption and any(sig in cap_lower for sig in _instruction_signals):
-        prompt = f"Look at this image and write a post caption based on this instruction: {caption}\n\nJust the caption text itself, nothing else. No labels, no explanations."
+    if platform == "all":
+        user_hint = f"\nUser instruction: {caption}" if caption else ""
+        multi_prompt = (
+            f"Look at this image and write THREE platform-specific captions.{user_hint}\n\n"
+            "Format exactly like this (no extra text before or after):\n"
+            "LINKEDIN: [professional, engaging, 2-4 paragraphs]\n"
+            "TWITTER: [punchy, max 200 chars, no hashtag spam]\n"
+            "FACEBOOK: [conversational, friendly, 1-3 short paragraphs]"
+        )
+        gen_resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1000,
+            system=get_system(),
+            messages=[{"role": "user", "content": [image_block, {"type": "text", "text": multi_prompt}]}],
+        )
+        raw = next((b.text for b in gen_resp.content if hasattr(b, "text")), "")
+
+        def _pull(raw: str, key: str) -> str:
+            m = re.search(rf'{key}:\s*(.+?)(?=\n(?:LINKEDIN|TWITTER|FACEBOOK):|$)', raw, re.DOTALL | re.IGNORECASE)
+            return m.group(1).strip() if m else raw.strip()
+
+        li_caption = _pull(raw, "LINKEDIN")
+        tw_caption = _pull(raw, "TWITTER")[:280]
+        fb_caption = _pull(raw, "FACEBOOK")
     else:
-        prompt = caption if caption else "Look at this image and write a short, punchy post caption for it. Keep it on-brand for Duty World — creative, bold, professional. Just the caption text, nothing else."
+        if caption:
+            prompt = (
+                f"Look at this image. Write a social media caption for it.\n"
+                f"User instruction: {caption}\n\n"
+                "Write only the caption text. Do NOT include platform names, 'post this', or routing instructions."
+            )
+        else:
+            prompt = "Look at this image and write a short, punchy post caption for it. Keep it on-brand for Duty World — creative, bold, professional. Just the caption text, nothing else."
+        gen_resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            system=get_system(),
+            messages=[{"role": "user", "content": [image_block, {"type": "text", "text": prompt}]}],
+        )
+        caption = next((b.text for b in gen_resp.content if hasattr(b, "text")), caption)
+        li_caption = tw_caption = fb_caption = caption
 
-    gen_resp = claude.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=400,
-        system=get_system(),
-        messages=[{"role": "user", "content": [image_block, {"type": "text", "text": prompt}]}],
-    )
-    caption = next((b.text for b in gen_resp.content if hasattr(b, "text")), caption)
-
-    label = {"both": "LinkedIn + X", "all": "LinkedIn + X + Facebook", "facebook": f"Facebook ({fb_page_name or 'default page'})"}.get(platform, platform.title())
+    label = {
+        "both": "LinkedIn + X",
+        "all": "LinkedIn + X + all Facebook pages",
+        "twitter": "X",
+        "facebook": f"Facebook ({fb_page_name or FACEBOOK_PAGES[0]['name'] if FACEBOOK_PAGES else 'Facebook'})",
+    }.get(platform, platform.title())
     await update.message.reply_text(f"⏳ Uploading image to {label}...")
 
     try:
         lines = []
         if platform in ("linkedin", "both", "all"):
-            r = post_linkedin_with_image(caption, image_bytes)
+            r = post_linkedin_with_image(li_caption, image_bytes)
             lines.append(f"LinkedIn: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
             if r.get("success"):
-                _record_post("linkedin", r.get("post_url"), caption)
+                _record_post("linkedin", r.get("post_url"), li_caption)
         if platform in ("twitter", "both", "all"):
-            r = post_tweet_with_image(caption[:280], image_bytes)
+            r = post_tweet_with_image(tw_caption, image_bytes)
             lines.append(f"X: {'✅' if r['success'] else '❌ ' + r.get('error','')}")
             if r.get("success"):
-                _record_post("twitter", r.get("post_url"), caption[:280])
+                _record_post("twitter", r.get("post_url"), tw_caption)
         if platform in ("facebook", "all") and FACEBOOK_ENABLED:
-            if not fb_page_name and len(FACEBOOK_PAGES) > 1:
-                await update.message.reply_text(f"⚠️ Which Facebook page? Options: {', '.join(p['name'] for p in FACEBOOK_PAGES)}")
-                return
-            r = post_facebook_with_image(caption, image_bytes, fb_page_name)
-            lines.append(f"Facebook ({fb_page_name or FACEBOOK_PAGES[0]['name']}): {'✅' if r['success'] else '❌ ' + r.get('error','')}")
-            if r.get("success"):
-                _record_post("facebook", r.get("post_url"), caption)
+            if platform == "all":
+                for page in FACEBOOK_PAGES:
+                    r = post_facebook_with_image(fb_caption, image_bytes, page["name"])
+                    lines.append(f"Facebook ({page['name']}): {'✅' if r['success'] else '❌ ' + r.get('error','')}")
+                    if r.get("success"):
+                        _record_post("facebook", r.get("post_url"), fb_caption)
+            else:
+                if not fb_page_name and len(FACEBOOK_PAGES) > 1:
+                    await update.message.reply_text(f"⚠️ Which Facebook page? Options: {', '.join(p['name'] for p in FACEBOOK_PAGES)}")
+                    return
+                r = post_facebook_with_image(fb_caption, image_bytes, fb_page_name)
+                lines.append(f"Facebook ({fb_page_name or FACEBOOK_PAGES[0]['name']}): {'✅' if r['success'] else '❌ ' + r.get('error','')}")
+                if r.get("success"):
+                    _record_post("facebook", r.get("post_url"), fb_caption)
 
-        await update.message.reply_text("\n".join(lines) + f"\n\nCaption:\n{caption}")
+        if platform == "all":
+            summary = f"\n\nLinkedIn caption:\n{li_caption}\n\nX caption:\n{tw_caption}\n\nFacebook caption:\n{fb_caption}"
+        else:
+            summary = f"\n\nCaption:\n{li_caption}"
+        await update.message.reply_text("\n".join(lines) + summary)
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
