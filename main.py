@@ -357,16 +357,28 @@ def delete_facebook_post(post_url: str, page_name: str = "") -> dict:
     return {"success": False, "error": f"HTTP {r.status_code}: {r.text}"}
 
 
-def fetch_recent_facebook_posts(count: int = 20) -> list:
-    """Fetch recent posts from all configured Facebook pages."""
+def fetch_recent_facebook_posts(count: int = 25, page_name: str = "") -> list:
+    """Fetch recent posts from all configured Facebook pages (or a specific page)."""
+    pages = FACEBOOK_PAGES
+    if page_name:
+        p = _fb_resolve_page(page_name)
+        if p:
+            pages = [p]
     all_posts = []
-    for page in FACEBOOK_PAGES:
+    for page in pages:
         r = requests.get(
             f"{GRAPH_API}/{page['id']}/feed",
-            params={"fields": "id,message,created_time", "limit": count, "access_token": page["token"]},
+            params={
+                "fields": "id,message,story,attachments{description,media_type}",
+                "limit": count,
+                "access_token": page["token"],
+            },
         )
         if r.status_code == 200:
-            all_posts.extend(r.json().get("data", []))
+            for post in r.json().get("data", []):
+                post["_page_id"] = page["id"]
+                post["_page_name"] = page["name"]
+                all_posts.append(post)
     return all_posts
 
 # ── X / Twitter functions ─────────────────────────────────────────────────────
@@ -922,7 +934,18 @@ def _word_overlap(a: str, b: str) -> float:
     return len(wa & wb) / max(len(wa), len(wb))
 
 
-def find_post_url_by_content(post_text: str, platform: str) -> str | None:
+def _text_contained_in(fragment: str, full_text: str) -> float:
+    """Check what fraction of 'fragment' words appear in 'full_text'.
+    Handles truncated screenshots where vision sees only part of the post."""
+    clean = lambda s: set(re.sub(r'[^\w\s]', '', s.lower()).split())
+    frag_words = clean(fragment)
+    full_words = clean(full_text)
+    if not frag_words:
+        return 0.0
+    return len(frag_words & full_words) / len(frag_words)
+
+
+def find_post_url_by_content(post_text: str, platform: str, page_name: str = "") -> str | None:
     """Find a post URL by matching text — checks bot's own post log first, then platform API."""
     if not post_text.strip():
         return None
@@ -932,10 +955,12 @@ def find_post_url_by_content(post_text: str, platform: str) -> str | None:
     for entry in reversed(_post_history):
         if entry["platform"] != platform:
             continue
-        score = _word_overlap(post_text, entry["text"])
+        # Use asymmetric match: what fraction of extracted fragment appears in stored text
+        score = max(_word_overlap(post_text, entry["text"]),
+                    _text_contained_in(post_text, entry["text"]))
         if score > best_score:
             best_score, best_url = score, entry["url"]
-    if best_score >= 0.35:
+    if best_score >= 0.3:
         return best_url
 
     # 2. Fall back to platform API search
@@ -977,13 +1002,25 @@ def find_post_url_by_content(post_text: str, platform: str) -> str | None:
             pass
 
     elif platform == "facebook" and FACEBOOK_ENABLED:
-        for post in fetch_recent_facebook_posts():
-            msg = post.get("message", "")
-            if msg and _word_overlap(post_text, msg) >= 0.35:
+        best_url, best_score = None, 0.0
+        for post in fetch_recent_facebook_posts(page_name=page_name):
+            # Collect all text fields: message, story, attachment description
+            candidates = [post.get("message", ""), post.get("story", "")]
+            for att in post.get("attachments", {}).get("data", []):
+                candidates.append(att.get("description", ""))
+            full_text = " ".join(c for c in candidates if c)
+            if not full_text:
+                continue
+            score = max(_word_overlap(post_text, full_text),
+                        _text_contained_in(post_text, full_text))
+            if score > best_score:
+                best_score = score
                 post_id = post.get("id", "")
-                page_id = post_id.split("_")[0] if "_" in post_id else ""
+                page_id = post.get("_page_id", post_id.split("_")[0] if "_" in post_id else "")
                 local_id = post_id.split("_")[-1] if "_" in post_id else post_id
-                return f"https://www.facebook.com/permalink.php?story_fbid={local_id}&id={page_id}"
+                best_url = f"https://www.facebook.com/permalink.php?story_fbid={local_id}&id={page_id}"
+        if best_score >= 0.25:
+            return best_url
 
     return None
 
@@ -1071,7 +1108,7 @@ async def _handle_photo_inner(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # If vision didn't find a URL, search recent posts by content
         if not url and post_text:
-            url = find_post_url_by_content(post_text, platform)
+            url = find_post_url_by_content(post_text, platform, page_name)
 
         if url:
             if is_delete:
