@@ -1033,6 +1033,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
     cap_lower = caption.lower()
 
+    try:
+        await _handle_photo_inner(update, context, caption, cap_lower)
+    except Exception as e:
+        import traceback
+        print(f"[handle_photo ERROR] {traceback.format_exc()}")
+        await update.message.reply_text(f"❌ Unexpected error: {e}")
+
+
+async def _handle_photo_inner(update: Update, context: ContextTypes.DEFAULT_TYPE, caption: str, cap_lower: str):
     # Download image first — needed for both posting and vision analysis
     try:
         photo_file = await context.bot.get_file(update.message.photo[-1].file_id)
