@@ -99,7 +99,7 @@ print(f"✅ LinkedIn URN fetched: {LINKEDIN_URN}")
 
 # ── LinkedIn functions ────────────────────────────────────────────────────────
 
-_LI_VER = "20231201"
+_LI_VER = "202312"
 _LI_HEADERS = lambda: {
     "Authorization": f"Bearer {LINKEDIN_TOKEN}",
     "Content-Type": "application/json",
