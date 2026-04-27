@@ -683,8 +683,10 @@ TOOLS:
 - save_draft: hold for approval — show full draft, tell user "post it" / "cancel" / describe edits
 - schedule_post: schedule for future — parse natural language time, specify platform
 
-FORMATTING: Never use dashes, hyphens, or horizontal rules (—, -, ---, ──) anywhere in posts. Never use bullet points unless specifically asked. Write in natural flowing paragraphs like a real person talking. NEVER include labels like "LinkedIn version:", "X version:", "Facebook version:", or any separator text between versions — each platform gets its own clean post with nothing but the post content itself.
-Post raw text as-is if given. Write it if described. Never post without being explicitly asked."""
+FORMATTING: Never use dashes, hyphens, or horizontal rules (—, -, ---, ──) anywhere in posts. Never use bullet points unless specifically asked. Never use markdown formatting (**bold**, *italic*, _underline_, #headers) in posts — write plain text only. Write in natural flowing paragraphs like a real person talking. NEVER include labels like "LinkedIn version:", "X version:", "Facebook version:", or any separator text between versions — each platform gets its own clean post with nothing but the post content itself.
+Post raw text as-is if given. Write it if described. Never post without being explicitly asked.
+
+ERRORS: If a platform fails (e.g. Facebook permissions error), report it briefly with ❌ and move on. Never ask the user to post manually. Never explain technical API details to the user — just say which platform failed and what was posted successfully."""
 
 # ── Bot handlers ──────────────────────────────────────────────────────────────
 
@@ -965,26 +967,19 @@ def find_post_url_by_content(post_text: str, platform: str, page_name: str = "")
 
     # 2. Fall back to platform API search
     if platform == "linkedin":
-        # Build URL manually — avoid requests encoding the List() syntax
-        raw_url = (
-            f"https://api.linkedin.com/v2/ugcPosts"
-            f"?q=authors&authors=List(urn:li:person:{LINKEDIN_URN})&count=20"
-        )
         try:
-            s = requests.Session()
-            req = requests.Request("GET", raw_url, headers={
-                "Authorization": f"Bearer {LINKEDIN_TOKEN}",
-                "X-Restli-Protocol-Version": "2.0.0",
-            })
-            prepped = s.prepare_request(req)
-            prepped.url = raw_url  # Override to prevent re-encoding
-            r = s.send(prepped)
+            r = requests.get(
+                "https://api.linkedin.com/rest/posts",
+                headers=_LI_HEADERS(),
+                params={"q": "author", "author": f"urn:li:person:{LINKEDIN_URN}", "count": 20},
+            )
             if r.status_code == 200:
                 for post in r.json().get("elements", []):
                     try:
-                        text = post["specificContent"]["com.linkedin.ugc.ShareContent"]["shareCommentary"]["text"]
-                        if _word_overlap(post_text, text) >= 0.35:
-                            return f"https://www.linkedin.com/feed/update/{post['id']}/"
+                        text = post.get("commentary", "")
+                        if text and _word_overlap(post_text, text) >= 0.35:
+                            post_urn = post.get("id", "")
+                            return f"https://www.linkedin.com/feed/update/{post_urn}/"
                     except (KeyError, TypeError):
                         continue
         except Exception:
