@@ -28,8 +28,11 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        server.serve_forever()
+    except Exception as e:
+        print(f"[Health server error] {e}")
 
 # ── Clients ───────────────────────────────────────────────────────────────────
 
@@ -95,8 +98,12 @@ def get_linkedin_urn() -> str:
         return r2.json()["id"]
     raise Exception(f"Could not fetch LinkedIn URN: {r.text}")
 
-LINKEDIN_URN = get_linkedin_urn()
-print(f"✅ LinkedIn URN fetched: {LINKEDIN_URN}")
+try:
+    LINKEDIN_URN = get_linkedin_urn()
+    print(f"✅ LinkedIn URN fetched: {LINKEDIN_URN}")
+except Exception as e:
+    LINKEDIN_URN = ""
+    print(f"⚠️ LinkedIn URN fetch failed (LinkedIn posting disabled): {e}")
 
 # ── LinkedIn functions ────────────────────────────────────────────────────────
 
