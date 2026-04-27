@@ -1352,7 +1352,7 @@ async def post_init(application: Application):
         print("✅ Scheduler started")
 
 async def post_shutdown(application: Application):
-    pass  # Scheduler stays alive across restarts; shut down only on true exit
+    pass  # Scheduler stays alive across restarts
 
 
 def _build_app() -> Application:
@@ -1370,41 +1370,21 @@ def _build_app() -> Application:
 
 
 def main():
-    _token       = os.environ["TELEGRAM_BOT_TOKEN"]
-    _port        = int(os.environ.get("PORT", 8080))
-    # Render injects RENDER_EXTERNAL_URL automatically on Web Services —
-    # use it to switch to webhook mode (no polling conflict possible).
-    _webhook_url = os.environ.get("WEBHOOK_URL",
-                   os.environ.get("RENDER_EXTERNAL_URL", "")).rstrip("/")
+    threading.Thread(target=run_health_server, daemon=True).start()
+    print("✅ Health check server running")
 
-    if _webhook_url:
-        # ── Webhook mode (Render) ──────────────────────────────────────────────
-        # Telegram pushes updates to us → no two-instance conflict ever.
-        # run_webhook() binds to PORT and Render forwards HTTPS → HTTP internally.
-        print(f"🌐 Webhook mode → {_webhook_url}  port={_port}")
-        _build_app().run_webhook(
-            listen="0.0.0.0",
-            port=_port,
-            url_path=_token,
-            webhook_url=f"{_webhook_url}/{_token}",
-            drop_pending_updates=True,
-        )
-    else:
-        # ── Polling mode (local) with auto-restart ─────────────────────────────
-        threading.Thread(target=run_health_server, daemon=True).start()
-        print("✅ Health check server running (polling mode)")
-        while True:
-            try:
-                print("🤖 Duty World Bot starting...")
-                _build_app().run_polling(drop_pending_updates=True)
-                break
-            except (KeyboardInterrupt, SystemExit):
-                if scheduler.running:
-                    scheduler.shutdown(wait=False)
-                break
-            except Exception as e:
-                print(f"[Bot crashed] {type(e).__name__}: {e}. Restarting in 15 s...")
-                time.sleep(15)
+    while True:
+        try:
+            print("🤖 Duty World Bot starting...")
+            _build_app().run_polling(drop_pending_updates=True)
+            break
+        except (KeyboardInterrupt, SystemExit):
+            if scheduler.running:
+                scheduler.shutdown(wait=False)
+            break
+        except Exception as e:
+            print(f"[Bot crashed] {type(e).__name__}: {e}. Restarting in 15 s...")
+            time.sleep(15)
 
 
 if __name__ == "__main__":
