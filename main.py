@@ -1340,24 +1340,22 @@ async def check_facebook_token_expiry(bot):
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
 async def post_init(application: Application):
-    scheduler.start()
-    # Daily Facebook token expiry check at 9:00am Ghana time (UTC+0)
-    scheduler.add_job(
-        check_facebook_token_expiry,
-        "cron",
-        hour=9,
-        minute=0,
-        args=[application.bot],
-    )
-    print("✅ Scheduler started")
+    if not scheduler.running:
+        scheduler.start()
+        scheduler.add_job(
+            check_facebook_token_expiry,
+            "cron",
+            hour=9,
+            minute=0,
+            args=[application.bot],
+        )
+        print("✅ Scheduler started")
 
 async def post_shutdown(application: Application):
-    scheduler.shutdown()
+    pass  # Scheduler stays alive across restarts; shut down only on true exit
 
-def main():
-    threading.Thread(target=run_health_server, daemon=True).start()
-    print("✅ Health check server running")
 
+def _build_app() -> Application:
     app = (
         Application.builder()
         .token(os.environ["TELEGRAM_BOT_TOKEN"])
@@ -1368,8 +1366,45 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    print("🤖 Duty World Bot is running...")
-    app.run_polling(drop_pending_updates=True)
+    return app
+
+
+def main():
+    _token       = os.environ["TELEGRAM_BOT_TOKEN"]
+    _port        = int(os.environ.get("PORT", 8080))
+    # Render injects RENDER_EXTERNAL_URL automatically on Web Services —
+    # use it to switch to webhook mode (no polling conflict possible).
+    _webhook_url = os.environ.get("WEBHOOK_URL",
+                   os.environ.get("RENDER_EXTERNAL_URL", "")).rstrip("/")
+
+    if _webhook_url:
+        # ── Webhook mode (Render) ──────────────────────────────────────────────
+        # Telegram pushes updates to us → no two-instance conflict ever.
+        # run_webhook() binds to PORT and Render forwards HTTPS → HTTP internally.
+        print(f"🌐 Webhook mode → {_webhook_url}  port={_port}")
+        _build_app().run_webhook(
+            listen="0.0.0.0",
+            port=_port,
+            url_path=_token,
+            webhook_url=f"{_webhook_url}/{_token}",
+            drop_pending_updates=True,
+        )
+    else:
+        # ── Polling mode (local) with auto-restart ─────────────────────────────
+        threading.Thread(target=run_health_server, daemon=True).start()
+        print("✅ Health check server running (polling mode)")
+        while True:
+            try:
+                print("🤖 Duty World Bot starting...")
+                _build_app().run_polling(drop_pending_updates=True)
+                break
+            except (KeyboardInterrupt, SystemExit):
+                if scheduler.running:
+                    scheduler.shutdown(wait=False)
+                break
+            except Exception as e:
+                print(f"[Bot crashed] {type(e).__name__}: {e}. Restarting in 15 s...")
+                time.sleep(15)
 
 
 if __name__ == "__main__":
