@@ -5,6 +5,8 @@ import base64
 import tempfile
 import threading
 import time
+import asyncio
+import queue as _queue
 import requests
 import anthropic
 import tweepy
@@ -16,27 +18,40 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ── Health check server ───────────────────────────────────────────────────────
+# ── HTTP server: health check + webhook receiver ──────────────────────────────
 
-class HealthHandler(BaseHTTPRequestHandler):
+_webhook_updates: _queue.Queue = _queue.Queue()
+
+class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
-    def log_message(self, format, *args):
+
+    def do_POST(self):
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        if self.path.strip("/") == token:
+            n = int(self.headers.get("Content-Length", 0))
+            _webhook_updates.put(self.rfile.read(n))
+            self.send_response(200)
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *args):
         pass
 
-def run_health_server():
+def _run_http_server():
     port = int(os.environ.get("PORT", 8080))
     try:
-        server = HTTPServer(("0.0.0.0", port), HealthHandler)
-        server.serve_forever()
+        HTTPServer(("0.0.0.0", port), _Handler).serve_forever()
     except Exception as e:
-        print(f"[Health server error] {e}")
+        print(f"[HTTP server error] {e}")
 
-# Start health check IMMEDIATELY — before any other init so Render always sees 200
-threading.Thread(target=run_health_server, daemon=True).start()
-print("✅ Health check server running")
+# Start IMMEDIATELY — before any other init so Render always sees 200 OK
+threading.Thread(target=_run_http_server, daemon=True).start()
+print("✅ HTTP server running")
 
 # ── Clients ───────────────────────────────────────────────────────────────────
 
@@ -1350,49 +1365,82 @@ async def check_facebook_token_expiry(bot):
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
-async def post_init(application: Application):
-    if not scheduler.running:
-        scheduler.start()
-        scheduler.add_job(
-            check_facebook_token_expiry,
-            "cron",
-            hour=9,
-            minute=0,
-            args=[application.bot],
-        )
-        print("✅ Scheduler started")
-
-async def post_shutdown(application: Application):
-    pass  # Scheduler stays alive across restarts
-
-
 def _build_app() -> Application:
-    app = (
-        Application.builder()
-        .token(os.environ["TELEGRAM_BOT_TOKEN"])
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
-    )
+    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     return app
 
 
-def main():
+def _start_scheduler(bot):
+    if not scheduler.running:
+        scheduler.start()
+        scheduler.add_job(check_facebook_token_expiry, "cron", hour=9, minute=0, args=[bot])
+        print("✅ Scheduler started")
+
+
+async def _webhook_loop(app: Application):
+    """Drain the webhook queue and feed updates into the Application."""
+    loop = asyncio.get_event_loop()
     while True:
         try:
-            print("🤖 Duty World Bot starting...")
-            _build_app().run_polling(drop_pending_updates=True)
-            break
-        except (KeyboardInterrupt, SystemExit):
-            if scheduler.running:
-                scheduler.shutdown(wait=False)
-            break
+            raw = await loop.run_in_executor(
+                None, lambda: _webhook_updates.get(timeout=1)
+            )
+            update = Update.de_json(json.loads(raw), app.bot)
+            await app.process_update(update)
+        except _queue.Empty:
+            pass
         except Exception as e:
-            print(f"[Bot crashed] {type(e).__name__}: {e}. Restarting in 15 s...")
-            time.sleep(15)
+            print(f"[Webhook update error] {e}")
+
+
+def main():
+    _token       = os.environ["TELEGRAM_BOT_TOKEN"]
+    _webhook_url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+
+    if _webhook_url:
+        # ── Webhook mode (Render) — no Conflict ever ───────────────────────────
+        # The HTTP server above already handles GET / (health) and POST /{token}
+        # (webhook). We just register the URL with Telegram and process the queue.
+        async def _run():
+            app = _build_app()
+            async with app:
+                _start_scheduler(app.bot)
+                await app.start()
+                await app.bot.set_webhook(
+                    url=f"{_webhook_url}/{_token}",
+                    drop_pending_updates=True,
+                )
+                print(f"✅ Webhook registered: {_webhook_url}/{_token}")
+                await _webhook_loop(app)  # runs forever
+
+        asyncio.run(_run())
+
+    else:
+        # ── Polling mode (local) with auto-restart ─────────────────────────────
+        while True:
+            try:
+                print("🤖 Starting in polling mode...")
+
+                async def _polling_run():
+                    app = _build_app()
+                    async with app:
+                        _start_scheduler(app.bot)
+                        await app.start()
+                        await app.updater.start_polling(drop_pending_updates=True)
+                        await app.updater.idle()
+
+                asyncio.run(_polling_run())
+                break
+            except (KeyboardInterrupt, SystemExit):
+                if scheduler.running:
+                    scheduler.shutdown(wait=False)
+                break
+            except Exception as e:
+                print(f"[Bot crashed] {type(e).__name__}: {e}. Restarting in 15 s...")
+                time.sleep(15)
 
 
 if __name__ == "__main__":
