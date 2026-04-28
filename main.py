@@ -34,6 +34,10 @@ def run_health_server():
     except Exception as e:
         print(f"[Health server error] {e}")
 
+# Start health check IMMEDIATELY — before any other init so Render always sees 200
+threading.Thread(target=run_health_server, daemon=True).start()
+print("✅ Health check server running")
+
 # ── Clients ───────────────────────────────────────────────────────────────────
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -1377,9 +1381,6 @@ def _build_app() -> Application:
 
 
 def main():
-    threading.Thread(target=run_health_server, daemon=True).start()
-    print("✅ Health check server running")
-
     while True:
         try:
             print("🤖 Duty World Bot starting...")
